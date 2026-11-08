@@ -294,12 +294,13 @@ def goal_events(entries):
     return events
 
 
-def bound_hit(entries, budget, bounds=BOUNDS):
+def bound_hit(entries, budget, bounds=BOUNDS, current=None):
     passes = [e for e in entries if e["event"] == "pass"]
     if len(passes) >= bounds["max_passes"]:
         return f"iteration cap: {len(passes)} passes"
     window = bounds["no_progress"]
-    recent = [p["note"] for p in passes[-window:]]
+    recent = [p["note"] for p in passes]
+    recent = (recent + [current])[-window:] if current is not None else recent[-window:]
     if len(recent) == window and len(set(recent)) == 1:
         return f"no progress: {window} passes with the same state"
     spent = token_total(entries)
@@ -329,11 +330,11 @@ def derive_open(s):
             return 2, "plan", "; ".join(s["lint"])
         return 3, "approve", "show contract, questions, and units; interrupt; then `approve`"
     if "defined" not in s["events"] or any(not u["check"] for u in s["units"] if u["state"] not in CLOSED):
-        return 4, "define", "dispatch swarm-examiner, then `define`"
+        return 4, "define", "run the examiner: `brief <goal> examiner`; it records its checks with `define`"
     if s.get("open_findings"):
         return 4, "amend", " ".join(s["open_findings"])
     if "baseline" not in s["events"]:
-        return 5, "baseline", "run `baseline`; re-dispatch the examiner for any unit whose check passes"
+        return 5, "baseline", "run `baseline`; rerun the examiner with `Strengthen:` for any unit whose check passes"
     return None
 
 
@@ -388,8 +389,10 @@ def derive(s):
     return derive_open(s) or derive_units(s) or derive_close(s)
 
 
-def fingerprint(units, events):
-    return clean(",".join(f"{u['unit']}:{u['state']}:{u['revisions']}" for u in units) + " " + ",".join(sorted(events)))
+def fingerprint(units, rows):
+    """Changes whenever anything but a pass or a token count is logged, so every check, review, or answer is progress."""
+    work = sum(1 for e in rows if e["event"] not in ("pass", "tokens"))
+    return clean(",".join(f"{u['unit']}:{u['state']}:{u['revisions']}" for u in units) + f" work:{work}")
 
 
 # --- I/O ---
@@ -807,8 +810,9 @@ def current_row(goal):
     events = goal_events(log_rows)
     header = parse_header(text)
     proven = {e["subject"] for e in log_rows if e["event"] == "proof"}
+    now = fingerprint(units, log_rows)
     state = {
-        "stop": stopped(), "bound": bound_hit(log_rows, budget(goal), user_bounds()), "has_contract": True,
+        "stop": stopped(), "bound": bound_hit(log_rows, budget(goal), user_bounds(), now), "has_contract": True,
         "lint": lint_problems(text, units), "events": events, "units": units,
         "max_parallel": int(header.get("max_parallel") or 3), "autonomy": header.get("autonomy", "ask"),
         "unproven": [c for c in criteria(text) if c not in proven],
@@ -816,7 +820,7 @@ def current_row(goal):
         "phases": {u["unit"]: unit_phase(log_rows, u["unit"]) for u in units if u["state"] == "produced"},
         "fix_exists": any(u["unit"].startswith("F-") for u in units),
     }
-    return derive(state), fingerprint(units, events)
+    return derive(state), now
 
 
 def cmd_peek(goal):
@@ -1239,10 +1243,13 @@ if __name__ == "__main__":
     command, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
     if command in USER_COMMANDS:
         USER_COMMANDS[command](*args)
-    elif command in COMMANDS and args and command in LOCK_FREE:
-        COMMANDS[command](*args)
     elif command in COMMANDS and args:
-        with state_lock():
+        # A worker calls `report` from its own worktree, which `report` deletes. Work from the main tree.
+        os.chdir(root())
+        if command in LOCK_FREE:
             COMMANDS[command](*args)
+        else:
+            with state_lock():
+                COMMANDS[command](*args)
     else:
         fail(__doc__)

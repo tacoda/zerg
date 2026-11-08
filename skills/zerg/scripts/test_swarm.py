@@ -204,6 +204,15 @@ class Bounds(unittest.TestCase):
         self.assertIn("budget", swarm.bound_hit(tokens, 1000))
         self.assertIsNone(swarm.bound_hit(tokens, 0))
 
+    def test_progress_inside_a_state(self):
+        units = [unit("U-1", "a", state="produced")]
+        before = [{"event": "produced", "subject": "U-1"}]
+        after = before + [{"event": "check-ok", "subject": "U-1"}, {"event": "pass", "subject": "G"}]
+        self.assertNotEqual(swarm.fingerprint(units, before), swarm.fingerprint(units, after))
+        passes = [{"event": "pass", "note": "old"}] * 2
+        self.assertIsNone(swarm.bound_hit(passes, 0, current="new"))
+        self.assertIn("no progress", swarm.bound_hit(passes, 0, current="old"))
+
     def test_iteration_cap(self):
         passes = [{"event": "pass", "note": str(i)} for i in range(swarm.BOUNDS["max_passes"])]
         self.assertIn("iteration cap", swarm.bound_hit(passes, 0))

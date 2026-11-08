@@ -51,7 +51,7 @@ expect "lease makes a worktree" "$S lease G-1 U-001" "worktree .*/.swarm/.work/G
 expect "brief names the role file" "$S brief G-1 worker U-001" "references/worker.md"
 
 worker U-001 "printf '\ndef sub(a, b):\n    return a - b\n' >> src/calc.py"
-expect "worker reports" "$S report G-1 U-001 produced 'sub added'" "leased -> produced"
+expect "worker reports from inside its worktree" "cd .swarm/.work/G-1/U-001 && $S report G-1 U-001 produced 'sub added'" "leased -> produced"
 expect "worktree removed after report" "ls .swarm/.work/G-1" "^$"
 expect "next says check" "$S next G-1" "row 6 check: U-001"
 expect "check passes" "$S check G-1 U-001" '"ok": true'
