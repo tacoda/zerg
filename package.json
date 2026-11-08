@@ -1,0 +1,13 @@
+{
+  "name": "zerg",
+  "private": true,
+  "description": "A governed agent swarm, packaged as an agent skill.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test skills/zerg/scripts/swarm.test.mjs tests/skill-spec.test.mjs tests/e2e.test.mjs"
+  }
+}

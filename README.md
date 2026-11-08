@@ -4,7 +4,7 @@ An [agent skill](https://agentskills.io/specification) that runs a governed swar
 it a goal in plain language. It writes a contract and a plan, asks you to approve once, runs examiner, worker,
 and verifier roles through test-first stages, and hands you a branch to merge.
 
-It works in any agent that can run shell commands. A Python script holds every gate, bound, and state change,
+It works in any agent that can run shell commands. A dependency-free Node script holds every gate, bound, and state change,
 so the rules are enforced by code. The skill's instructions cover only the judgment work: planning, writing
 tests, writing code, and reviewing it.
 
@@ -18,7 +18,8 @@ npx skills add tacoda/zerg -g         # for every project
 npx skills check                      # see whether a newer zerg is out; run `add` again to update
 ```
 
-It needs git, Python 3.8 or later, and a repo whose test suite runs from one command.
+It needs git, Node.js 18 or later, and a repo whose test suite runs from one command. If you installed it with
+`npx skills`, you already have Node.
 
 ## Use it
 
@@ -39,7 +40,7 @@ To stop new work at any time, run `touch .swarm/STOP`.
 
 ## What it does, in order
 
-| # | Stage | Who | Enforced by `swarm.py` |
+| # | Stage | Who | Enforced by `swarm.mjs` |
 |---|---|---|---|
 | 1 | Onboard: clean tree, base branch, green suite | orchestrator | `approve` |
 | 2 | Scope: observable criteria, constraints, grep criteria with owners | orchestrator | `lint` |
@@ -56,11 +57,11 @@ To stop new work at any time, run `touch .swarm/STOP`.
 | 13 | Learn: lessons split into two lanes and routed | orchestrator | `stage learned` |
 | 14 | Hand off with token cost; you merge | you | `handoff` |
 
-`swarm.py next` is the derive table: the agent runs it, does the one action it prints, and runs it again.
+`swarm.mjs next` is the derive table: the agent runs it, does the one action it prints, and runs it again.
 
 ## Roles in any agent
 
-The examiner, worker, and verifier are files in `skills/zerg/references/`. `swarm.py brief` prints the
+The examiner, worker, and verifier are files in `skills/zerg/references/`. `swarm.mjs brief` prints the
 whole handoff for one role: a few identifiers and the path to its role file, never a summary of the run.
 - **Agents with subagents** give each brief to a fresh subagent. Workers and verifiers run in parallel.
 - **Agents without subagents** play each role in turn. That works, but one agent reviewing its own code is
@@ -99,10 +100,11 @@ Rules change what the roles are told. They can't loosen what the script enforces
 ## Develop
 
 ```sh
-python3 skills/zerg/scripts/test_swarm.py     # unit tests for the script
-bash tests/e2e.sh                             # full lifecycle on a throwaway repo
-python3 tests/test_skill_spec.py              # SKILL.md against the agentskills spec
+npm test      # unit tests, the agentskills spec check, and the full lifecycle on a throwaway repo
 ```
+
+The script has no dependencies and no build step. It uses `// @ts-check` with JSDoc types, so your editor
+type-checks it as you work.
 
 For live edits while you work, symlink the skill into your agent's skills directory. For Claude Code, that's
 `ln -s "$PWD/skills/zerg" ~/.claude/skills/zerg`. `npx skills add ./ ` does the same for other agents.

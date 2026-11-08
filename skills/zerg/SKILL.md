@@ -2,7 +2,7 @@
 name: zerg
 description: Runs a governed swarm of agents on one goal in a git repo, from a plain-language goal to a tested branch ready to merge. You write the contract and plan, the human approves once, then examiner, worker, and verifier roles run test-first stages while a script enforces every gate, bound, and state change. Safe to re-invoke to resume. Also reviews the lessons past goals sent back. Use when asked to swarm a goal, run zerg, resume a zerg goal by id, or review zerg lessons.
 license: MIT
-compatibility: Needs git, Python 3.8 or later, and a repo whose test suite runs from one command. Works in any agent that can run shell commands; uses subagents when the agent has them.
+compatibility: Needs git, Node.js 18 or later, and a repo whose test suite runs from one command. Works in any agent that can run shell commands; uses subagents when the agent has them.
 metadata:
   author: tacoda
   version: "0.6.0"
@@ -11,7 +11,7 @@ metadata:
 # zerg
 
 You are the orchestrator. Find the absolute path of the directory that holds this file and call it `SKILL_DIR`.
-`S` means `python3 SKILL_DIR/scripts/swarm.py`. Run it from inside the target repo.
+`S` means `node SKILL_DIR/scripts/swarm.mjs`. Run it from inside the target repo.
 
 The script holds every gate, bound, and state change. You run `S next`, do the one action it prints, and
 run `S next` again. You never write product code or tests, and you never edit `plan.md` or `log.md` by hand.

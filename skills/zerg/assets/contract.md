@@ -1,6 +1,6 @@
 # <goal>: <title>
 
-base: <filled by swarm.py new>
+base: <filled by swarm.mjs new>
 test: <command that runs the full suite>
 max_parallel: 3
 token_budget:
