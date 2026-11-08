@@ -3,9 +3,8 @@
 You did not write this code. Assume it's wrong until the evidence says otherwise. Your brief gives you
 `Goal`, `Unit` (a unit id, or `whole`), `MAIN`, and `S`. Work in `MAIN`.
 
-- Change no file, branch, or git state. `S review` rejects your verdict if the tree has changed.
+- Change no file, branch, or git state, including the files in `.swarm/`. `S review` restores any change and rejects your verdict.
 - Run every experiment in a temp directory outside the repo (`mktemp -d`).
-- Never read `.swarm/*/holdout/`.
 
 First read `.swarm/<goal>/contract.md` and `.swarm/<goal>/plan.md`. Then read `.swarm/LEARNINGS.md` and the user
 rules (`cat "${ZERG_HOME:-$HOME/.zerg}/rules.md"`), if they exist. Judge the code against all of them.

@@ -9,9 +9,12 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const SWARM = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", "zerg", "scripts", "swarm.mjs");
-const T = fs.mkdtempSync(path.join(os.tmpdir(), "zerg-e2e-"));
-const env = { ...process.env, ZERG_HOME: path.join(T, "home") };
-after(() => fs.rmSync(T, { recursive: true, force: true }));
+const TOP = fs.mkdtempSync(path.join(os.tmpdir(), "zerg-e2e-"));
+const T = path.join(TOP, "repo");
+const HOME = path.join(TOP, "home");
+fs.mkdirSync(T);
+const env = { ...process.env, ZERG_HOME: HOME };
+after(() => fs.rmSync(TOP, { recursive: true, force: true }));
 
 /** Runs a shell command in the repo; `$S` is the swarm script. Returns stdout and stderr together. */
 function sh(command) {
@@ -54,22 +57,45 @@ test("scope and plan", () => {
   edit(".swarm/G-1/plan.md", "| U-002 | one sentence | path/b.py | U-001 | C1, C2 | | planned | 0 | |", "| U-002 | add mul | src/mul.py | U-001 | C2 | | planned | 0 | |");
 });
 
+test("a grep criterion with shell operators is refused", () => {
+  edit(".swarm/G-1/contract.md", "- C2: mul(2, 3) returns 6", "- C2: mul(2, 3) returns 6\n- C3: `grep -rn x src; touch pwned`");
+  assert.match(sh("$S lint G-1"), /C3: a grep criterion must be one plain grep command/);
+  assert.ok(!fs.existsSync(path.join(T, "pwned")), "lint must never run the criterion through a shell");
+  edit(".swarm/G-1/contract.md", "\n- C3: `grep -rn x src; touch pwned`", "");
+});
 step("lint passes", "$S lint G-1", /plan ok/);
 step("summary for approval", "$S summary G-1", /U-002 {2}add mul/);
 step("approve", "$S approve G-1 ask", /on swarm\/G-1/);
 step("infrastructure commit", "git log --oneline", /infrastructure: ignore swarm state/);
 
+let HOLDOUT = "";
+test("only the examiner's brief names the holdout, and it lives outside the repo", () => {
+  HOLDOUT = /HOLDOUT: (.+)/.exec(sh("$S brief G-1 examiner"))?.[1] ?? "";
+  assert.ok(HOLDOUT.startsWith(HOME) && !HOLDOUT.startsWith(T), HOLDOUT);
+  assert.doesNotMatch(sh("$S brief G-1 worker U-001") + sh("$S brief G-1 verifier U-001"), /HOLDOUT/);
+});
+
 test("examiner writes tests", () => {
   write("tests/test_sub.py", pyTest("sub", "calc import sub", "self.assertEqual(sub(5, 3), 2)"));
   write("tests/test_mul.py", pyTest("mul", "mul import mul", "self.assertEqual(mul(2, 3), 6)"));
-  write(".swarm/G-1/holdout/test_h.py", pyTest("add_unchanged", "calc import add", "self.assertEqual(add(-1, 1), 0)"));
+  fs.writeFileSync(path.join(HOLDOUT, "test_h.py"), pyTest("add_unchanged", "calc import add", "self.assertEqual(add(-1, 1), 0)"));
 });
 
-step("examiner defines checks",
-  "$S define G-1 'U-001=PYTHONPATH=src python3 -m unittest tests.test_sub -q' 'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q' " +
-  "'holdout=PYTHONPATH=src python3 -m unittest discover -s .swarm/G-1/holdout -q' 'finding:U-001=keep add unchanged'", /checks recorded/);
+const DEFINE = "$S define G-1 'U-001=PYTHONPATH=src python3 -m unittest tests.test_sub -q' 'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q' " +
+  "\"holdout=PYTHONPATH=src python3 -m unittest discover -s '$HOLDOUT' -q\" 'finding:U-001=keep add unchanged'";
+test("define refuses to commit a secret, and writes nothing", () => {
+  write(".env", "TOKEN=x\n");
+  assert.match(sh(DEFINE.replace("$HOLDOUT", HOLDOUT)), /look like secrets: \.env/);
+  fs.rmSync(path.join(T, ".env"));
+  assert.doesNotMatch(sh("cat .swarm/G-1/log.md"), /examiner-finding/);
+});
+test("examiner defines checks", () => assert.match(sh(DEFINE.replace("$HOLDOUT", HOLDOUT)), /checks recorded/));
+step("the examiner's files are recorded", "grep '| test-files |' .swarm/G-1/log.md", /tests\/test_mul\.py, tests\/test_sub\.py|tests\/test_sub\.py, tests\/test_mul\.py/);
 step("holdout command is not in the contract", "git show HEAD:.swarm/G-1/contract.md | grep -c '^holdout'", /^0$/m);
-step("holdout command is in the ignored dir", "cat .swarm/G-1/holdout/command", /discover -s \.swarm\/G-1\/holdout/);
+test("holdout command lives outside the repo", () => {
+  assert.match(fs.readFileSync(path.join(HOLDOUT, "command"), "utf8"), /discover -s/);
+  assert.match(sh("git ls-files | grep -c holdout || true"), /^0$/m);
+});
 step("an open finding blocks baseline", "$S baseline G-1", /not routed/);
 step("next says amend", "$S next G-1", /row 4 amend: U-001/);
 step("amend", "$S amend G-1 U-001 keep add unchanged", /task amended/);
@@ -78,14 +104,30 @@ step("only U-001 is ready", "$S lease G-1 U-002", /not ready/);
 step("lease makes a worktree", "$S lease G-1 U-001", /worktree .*\/\.swarm\/\.work\/G-1\/U-001/);
 step("brief names the role file", "$S brief G-1 worker U-001", /references\/worker\.md/);
 
+test("a path-traversal unit id is refused and nothing is deleted", () => {
+  assert.match(sh("$S report G-1 ../../.. gave_up x"), /unit id must look like U-001/);
+  assert.match(sh("git rev-parse --is-inside-work-tree"), /true/);
+});
+test("ZERG_HOME inside the repo is refused", () => {
+  const inside = spawnSync("node", [SWARM, "brief", "G-1", "examiner"], { cwd: T, env: { ...env, ZERG_HOME: path.join(T, "home") }, encoding: "utf8" });
+  assert.match(inside.stderr, /is inside this repo/);
+});
+step("a bad goal id is refused", "$S next ../x", /goal id must look like/);
+step("a report from a worktree with no commits keeps the worktree",
+  "$S report G-1 U-001 produced nothing; true", /no commits/);
 test("worker U-001", () => work("U-001", "printf '\\ndef sub(a, b):\\n    return a - b\\n' >> src/calc.py"));
 step("worker reports from inside its worktree", "cd .swarm/.work/G-1/U-001 && $S report G-1 U-001 produced 'sub added'", /leased -> produced/);
+step("a stale second report changes nothing", "$S report G-1 U-001 produced again", /is produced, not leased/);
+step("move can't skip the gates", "$S move G-1 U-001 merged skip", /move only handles/);
 step("worktree removed after report", "ls .swarm/.work/G-1 | wc -l", /^\s*0$/m);
 step("next says check", "$S next G-1", /row 6 check: U-001/);
 step("check passes", "$S check G-1 U-001", /"ok": true/);
 step("merge refused before review", "$S merge G-1 U-001", /passed by a verifier/);
 step("a verifier write is restored", "echo '# scribble' >> src/calc.py && $S review G-1 U-001 pass looks right", /verifier changed the tree/);
 step("tree clean again", "git status --porcelain -- src | wc -l", /^\s*0$/m);
+step("a verifier edit to state files is caught too", "echo forged >> .swarm/G-1/log.md && $S review G-1 U-001 pass looks right",
+  /verifier changed the tree \(\.swarm\/G-1\/log\.md\)/);
+step("the forged line is gone and the restore is committed", "grep -c forged .swarm/G-1/log.md; git status --porcelain | wc -l", /^0\n\s*0$/m);
 step("review pass", "$S review G-1 U-001 pass looks right", /review pass/);
 step("next says merge", "$S next G-1", /row 6 merge: U-001/);
 step("merge", "$S merge G-1 U-001", /produced -> merged/);
@@ -117,6 +159,13 @@ step("next says add-fix", "$S next G-1", /row 11 add-fix/);
 step("add a fix unit", "$S add-fix G-1 tidy src/util.py", /added F-1/);
 step("the fix unit is ready", "$S next G-1", /row 8 implement: F-1/);
 
+test("worker F-1 edits the examiner's tests", () => {
+  sh("$S lease G-1 F-1");
+  work("F-1", "printf 'X = 1\\n' > src/util.py && echo '# weaker' >> tests/test_mul.py");
+  sh("$S report G-1 F-1 produced tidy");
+});
+step("touching the examiner's tests is refused", "$S check G-1 F-1", /changes the examiner's tests: tests\/test_mul\.py/);
+
 test("worker F-1", () => {
   sh("$S lease G-1 F-1");
   work("F-1", "printf 'X = 1\\n' > src/util.py");
@@ -142,7 +191,7 @@ test("write learn.md", () => write(".swarm/G-1/learn.md",
 step("learn routes both lanes", "$S stage G-1 learned", /zerg -> .*inbox\.md/);
 step("the project lesson is committed", "git show swarm/G-1:.swarm/LEARNINGS.md", /demo project rule/);
 step("the inbox lists the zerg lesson", "$S inbox", /\/G-1\/P1/);
-step("accept into rules", `$S accept ${path.basename(T)}/G-1/P1 keep`, /rules\.md/);
+step("accept into rules", `$S accept repo/G-1/P1 keep`, /rules\.md/);
 step("handoff", "$S handoff G-1", /checked out main/);
 step("no leftover worktrees", "git worktree list | wc -l", /^\s*1$/m);
 step("state lives on the branch only", "$S status G-1", /check it out first/);

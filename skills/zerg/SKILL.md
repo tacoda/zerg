@@ -24,7 +24,7 @@ The roles do the work: the examiner writes tests, workers write code, and verifi
 3. **Hand off by identifier.** A role gets exactly what `S brief` prints. Never add a summary of the run.
 4. **Roles record their own results** with `S define`, `S report`, and `S review`. You don't relay or reinterpret them.
 5. **Scripts check; they don't trust.** `report` needs commits, `check` runs the tests, and `merge` needs a recorded pass.
-6. **Holdout stays hidden.** Never show a role anything under `.swarm/<goal>/holdout/`.
+6. **Holdout stays hidden.** It lives outside the repo, and only the examiner's brief names it. Never pass that path to anyone else.
 7. **Nothing merges into base.** You build `swarm/<goal>`. The human merges it.
 
 ## Running a role
@@ -52,7 +52,7 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 | 6 | `check` | Run `S check <goal> <unit>` for each unit. Failures revise themselves. |
 | 6 | `review` | Run a verifier per unit: `S brief <goal> verifier <unit>`. It records its verdict with `S review`. |
 | 6 | `merge` | Run `S merge <goal> <unit>` for each unit. |
-| 7 | `orphans` | For each unit: `S move <goal> <unit> planned "lease lost"`. |
+| 7 | `orphans` | For each unit: `S move <goal> <unit> planned "lease lost"`. `move` handles only this and drops; every other state change goes through its gate. |
 | 8 | `implement` | Run `S lease <goal> <units>`, then a worker per unit: `S brief <goal> worker <unit>`. Each records its result with `S report`. |
 | 9 | `interrupt` | Read each listed unit's `note` in `plan.md`. Ask the human one question per unit (see Asking). |
 | 9 | `auto-drop` | For each unit: `S move <goal> <unit> dropped "auto: <note>"`. |

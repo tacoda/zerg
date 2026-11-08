@@ -212,7 +212,7 @@ describe("user layer", () => {
 
   test("config overrides the bounds", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "zerg-"));
-    fs.writeFileSync(path.join(home, "config"), "max_revisions: 4\nbogus: 9\nno_progress: x\n");
+    fs.writeFileSync(path.join(home, "config"), "max_revisions: 4\nbogus: 9\nno_progress: 1\nmax_passes: x\n");
     process.env.ZERG_HOME = home;
     try {
       assert.deepEqual(swarm.userBounds(), { ...swarm.BOUNDS, max_revisions: 4 });
@@ -230,10 +230,10 @@ describe("user layer", () => {
 describe("bounds", () => {
   test("no progress and budget", () => {
     const passes = Array(3).fill({ event: "pass", note: "same" });
-    assert.match(swarm.boundHit(passes, 0), /no progress/);
+    assert.match(swarm.boundHit(passes), /no progress/);
     const tokens = [{ event: "tokens", note: "implement 600" }, { event: "tokens", note: "review 500" }];
-    assert.match(swarm.boundHit(tokens, 1000), /budget/);
-    assert.equal(swarm.boundHit(tokens, 0), null);
+    assert.match(swarm.boundHit(tokens, { budget: 1000 }), /budget/);
+    assert.equal(swarm.boundHit(tokens), null);
   });
 
   test("progress inside a state counts", () => {
@@ -242,19 +242,59 @@ describe("bounds", () => {
     const after = [...before, { event: "check-ok", subject: "U-1" }, { event: "pass", subject: "G" }];
     assert.notEqual(swarm.fingerprint(units, before), swarm.fingerprint(units, after));
     const passes = Array(2).fill({ event: "pass", note: "old" });
-    assert.equal(swarm.boundHit(passes, 0, swarm.BOUNDS, "new"), null);
-    assert.match(swarm.boundHit(passes, 0, swarm.BOUNDS, "old"), /no progress/);
+    assert.equal(swarm.boundHit(passes, { current: "new" }), null);
+    assert.match(swarm.boundHit(passes, { current: "old" }), /no progress/);
   });
 
   test("the iteration cap grows with the plan", () => {
     const passes = Array.from({ length: swarm.BOUNDS.max_passes }, (_, i) => ({ event: "pass", note: String(i) }));
-    assert.match(swarm.boundHit(passes, 0), /iteration cap/);
-    assert.equal(swarm.boundHit(passes, 0, swarm.BOUNDS, null, 5), null, "a clean 5-unit goal must fit");
+    assert.match(swarm.boundHit(passes), /iteration cap/);
+    assert.equal(swarm.boundHit(passes, { unitCount: 5 }), null, "a clean 5-unit goal must fit");
     const more = [...passes, ...Array.from({ length: 25 }, (_, i) => ({ event: "pass", note: String(100 + i) }))];
-    assert.match(swarm.boundHit(more, 0, swarm.BOUNDS, null, 5), /cap 45/);
+    assert.match(swarm.boundHit(more, { unitCount: 5 }), /cap 45/);
   });
 
   test("scope violations", () => {
     assert.deepEqual(swarm.scopeViolations(["src/a.py", "tests/t.py"], ["src/*.py"]), ["tests/t.py"]);
+  });
+});
+
+describe("batch 1 guards", () => {
+  test("ids are validated before they reach a path", () => {
+    assert.equal(swarm.argProblem("report", ["G-ok", "U-001", "produced"]), null);
+    assert.match(swarm.argProblem("report", ["G-ok", "../../..", "gave_up"]), /unit id/);
+    assert.match(swarm.argProblem("next", ["../x"]), /goal id/);
+    assert.match(swarm.argProblem("next", ["G-Bad Name"]), /goal id/);
+    assert.match(swarm.argProblem("lease", ["G-ok", "U-001", "U-002/../x"]), /U-002\/\.\.\/x/);
+    assert.equal(swarm.argProblem("review", ["G-ok", "whole", "pass"]), null);
+    assert.equal(swarm.argProblem("answer", ["G-ok", "goal", "x"]), null);
+    assert.equal(swarm.argProblem("brief", ["G-ok", "verifier", "whole"]), null);
+    assert.match(swarm.argProblem("tokens", ["G-ok", "a b", "x", "1"]), /plain word/);
+  });
+
+  test("grep criteria parse to argv, or not at all", () => {
+    assert.deepEqual(swarm.grepArgv(`grep -rn "a b" src`), ["grep", "-rn", "a b", "src"]);
+    assert.deepEqual(swarm.grepArgv("grep -rn 'x;y' src"), ["grep", "-rn", "x;y", "src"]);
+    for (const bad of ["grep x src; touch p", "grep x src | sh", "grep $(id) src", "grep `id` src", "grep x > f", "rm -rf x", "grep 'open"]) {
+      assert.equal(swarm.grepArgv(bad), null, bad);
+    }
+  });
+
+  test("glob overlap finds real overlaps and only those", () => {
+    assert.ok(swarm.globOverlap("src/*.js", "src/a*"), "both match src/abc.js");
+    assert.ok(swarm.globOverlap("src/a.py", "src/*.py"));
+    assert.ok(swarm.globOverlap("src/**", "src/x/y.py"));
+    assert.ok(!swarm.globOverlap("src/*.js", "src/*.py"));
+    assert.ok(!swarm.globOverlap("src/a.py", "src/b.py"));
+    assert.ok(!swarm.globOverlap("lib/*", "src/*"));
+  });
+
+  test("the examiner's test files are off limits whatever the scope", () => {
+    assert.deepEqual(swarm.testViolations(["src/a.py", "src/a.test.js"], ["src/a.test.js"]), ["src/a.test.js"]);
+  });
+
+  test("secret-looking files are recognized", () => {
+    for (const p of [".env", ".env.local", "config/.env.production", "certs/server.pem", "id.key"]) assert.ok(swarm.SECRET.test(p), p);
+    for (const p of ["src/env.py", "keyboard.js", "docs/pem-format.md"]) assert.ok(!swarm.SECRET.test(p), p);
   });
 });

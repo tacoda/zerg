@@ -75,8 +75,12 @@ Each role records its own result through the script (`define`, `report`, `review
 - **Isolation:** every worker gets its own worktree and branch, and `lint` keeps their scopes from overlapping.
 - **Fail-first tests:** tests come from the examiner and must fail before work starts. A worker's diff must stay inside its scope.
 - **Never trust a report:** `report produced` needs commits, `check` runs the tests itself, and `merge` needs a recorded pass.
-- **Checks don't repair:** a verifier's edits are restored, and its verdict is refused.
-- **Holdout stays hidden:** the holdout tests and their command live in a gitignored folder that no worktree contains.
+  `move` can't skip a gate: by hand it only records a lost lease or a drop.
+- **Checked ids:** every goal and unit id is validated before it reaches a path, a branch name, or a delete.
+- **No shell in planning:** grep criteria run as argv, so `lint` and `summary` never execute contract text.
+- **Checks don't repair:** a verifier's edits are restored, state files included, and its verdict is refused.
+- **Holdout stays hidden:** the holdout tests and their command live outside the repo, in `$ZERG_HOME/holdout/`, where
+  no test runner collects them. Only the examiner's brief names the folder.
 - **Two strikes:** a third failure, or the same failure word for word, makes a unit stuck.
 - **Bounds:** no-progress, iteration, and token limits, plus `.swarm/STOP`.
 - **Nothing merges into your base branch.**

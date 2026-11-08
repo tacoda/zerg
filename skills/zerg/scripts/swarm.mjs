@@ -9,10 +9,27 @@
  * No dependencies, Node 18+. Every state change takes .swarm/.lock, so parallel agents can call it safely.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ARG_KINDS, ARG_SHAPES, BOUNDS, CLOSED, COLUMNS, GOAL_ID,
+  IGNORES, MANUAL_MOVES, NOT_TREE, PASSES_PER_UNIT, ROLES, SECRET,
+  SECTIONS, SHELL_META, TRANSITIONS, UNIT_ID, WILD, argProblem,
+  blockedUnits, boundHit, charClass, checkTransition, clean, criteria,
+  derive, deriveClose, deriveGates, derivePrep, deriveUnits, endWord,
+  escapeRe, fingerprint, fnmatch, globOverlap, globToken, globsOverlap,
+  goalEvents, grepArgv, grepCriteria, grepHitFiles, grepProblems, idsIn,
+  isUnitId, lines, lintProblems, mergeOrder, needsDefine, openFindings,
+  openQuote, parseHeader, parseInbox, parseTable, partition, planProblems,
+  quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
+  rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
+  splitLanes, splitList, testViolations, tokenTotal, unitPhase,
+} from "./core.mjs";
+
+export * from "./core.mjs";
 
 const USAGE = `zerg control plane
 
@@ -20,7 +37,7 @@ const USAGE = `zerg control plane
   lint <goal>                         plan gate: sections, criteria, scopes, deps, coverage
   approve <goal> [ask|auto]           lint + clean tree + green suite on base, then branch swarm/<goal>
   define <goal> U-001='cmd' .. [holdout='cmd'] [finding:U-001='text']   examiner's checks and findings;
-                                      the holdout command is stored in the gitignored holdout dir
+                                      the holdout command and tests live outside the repo, in $ZERG_HOME/holdout
   amend <goal> <unit> <text>          route an examiner finding into a planned unit's task
   baseline <goal>                     every unit check must fail before any work
   next <goal>                         the derive table: prints the one next action, counts a pass
@@ -34,7 +51,7 @@ const USAGE = `zerg control plane
   check <goal> <unit>                 scope + unit check in a temp worktree; revises on failure
   merge <goal> <unit>                 needs a recorded pass; merges, re-runs merged checks; rolls back on red
   revise <goal> <unit> <note>         two strikes, or the same note word for word, makes it stuck
-  move <goal> <unit> <state> [note]   stuck (escalation), dropped, planned (lease lost)
+  move <goal> <unit> <state> [note]   by hand only: leased -> planned (lease lost), planned|stuck -> dropped
   answer <goal> <unit|goal> <text>    record a human decision in the contract; unit back to planned
   rescope <goal> <unit> <scope> [why] a human decision: new scope for a stuck unit
   add-fix <goal> <task> <scope>       one fix unit for a blocking whole-review finding
@@ -56,30 +73,6 @@ User layer, in $ZERG_HOME (default ~/.zerg), outside the skill so it survives up
 const SCRIPT = fs.realpathSync(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.dirname(path.dirname(SCRIPT));
 const TEMPLATES = path.join(SKILL_DIR, "assets");
-export const IGNORES = [".swarm/*/holdout/", ".swarm/.tmp/", ".swarm/.work/", ".swarm/.lock", ".swarm/STOP", ".claude/worktrees/"];
-// Worker worktrees live here; they are never a verifier's writes.
-const NOT_TREE = [".claude/worktrees/", ".swarm/.tmp/", ".swarm/.work/", ".swarm/.lock"];
-const ROLES = ["examiner", "worker", "verifier"];
-export const COLUMNS = ["unit", "task", "scope", "after", "criteria", "check", "state", "revisions", "note"];
-const SECTIONS = ["Outcome", "Why", "Non-goals", "Constraints", "Criteria", "Escalate when"];
-/** @type {Record<string, string[]>} */
-const TRANSITIONS = {
-  planned: ["leased", "dropped", "stuck"],
-  leased: ["produced", "stuck", "planned"],
-  produced: ["merged", "planned", "stuck"],
-  stuck: ["planned", "dropped"],
-  merged: [],
-  dropped: [],
-};
-const CLOSED = ["merged", "dropped"];
-// Defaults. A user's ~/.zerg/config (or $ZERG_HOME/config) overrides them without a skill update.
-export const BOUNDS = { max_revisions: 2, max_passes: 20, no_progress: 3 };
-// A clean unit still takes about 4 passes (implement, check, review, merge), so the cap grows with the plan.
-export const PASSES_PER_UNIT = 5;
-
-/** @typedef {{unit: string, task: string, scope: string, after: string, criteria: string, check: string, state: string, revisions: string, note: string}} Unit */
-/** @typedef {{ts?: string, subject: string, event: string, note: string}} Entry */
-
 /** Thrown instead of process.exit, so `finally` blocks (the state lock) still run. */
 class Exit extends Error {
   /** @param {number} code @param {string} [message] */
@@ -98,362 +91,6 @@ function fail(message) {
 function exit(code) {
   throw new Exit(code);
 }
-
-// --- pure helpers (covered by swarm.test.mjs) ---
-
-/** @param {string} text */
-export const lines = (text) => {
-  const all = text.split(/\r?\n/);
-  if (all.length && all[all.length - 1] === "") all.pop();
-  return all;
-};
-
-/** @param {string} text @param {string} sep @returns {[string, string, string]} */
-const partition = (text, sep) => {
-  const i = text.indexOf(sep);
-  return i < 0 ? [text, "", ""] : [text.slice(0, i), sep, text.slice(i + sep.length)];
-};
-
-/** Python's fnmatch: `*` matches anything (slashes too), `?` one character, `[...]` a set. */
-export function fnmatch(name, pattern) {
-  let re = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === "[") {
-      const end = pattern.indexOf("]", i + 2);
-      if (end < 0) re += "\\[";
-      else {
-        let set = pattern.slice(i + 1, end).replace(/\\/g, "\\\\");
-        if (set.startsWith("!")) set = "^" + set.slice(1);
-        re += `[${set}]`;
-        i = end;
-      }
-    } else re += c.replace(/[.+^${}()|\\/-]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`, "s").test(name);
-}
-
-/** @param {unknown} value */
-export const clean = (value) => String(value).replace(/\|/g, "/").split(/\s+/).filter(Boolean).join(" ");
-
-/** @param {string} cell */
-export const splitList = (cell) => cell.split(",").map((s) => s.trim()).filter((s) => s !== "" && s !== "-");
-
-/** @param {string} text @returns {Unit[]} */
-export function parseTable(text) {
-  return lines(text).filter((l) => l.startsWith("|")).slice(2).map((line) => {
-    const cells = line.trim().replace(/^\|+|\|+$/g, "").split("|").map((c) => c.trim());
-    /** @type {any} */
-    const unit = Object.fromEntries(COLUMNS.map((c, i) => [c, cells[i] ?? ""]));
-    return unit;
-  });
-}
-
-/** @param {Unit[]} units */
-export function renderTable(units) {
-  const head = "| " + COLUMNS.join(" | ") + " |";
-  const rule = "|" + "---|".repeat(COLUMNS.length);
-  const body = units.map((u) => "| " + COLUMNS.map((c) => clean(/** @type {any} */ (u)[c] ?? "")).join(" | ") + " |");
-  return [head, rule, ...body].join("\n");
-}
-
-/** @param {string} text @param {Unit[]} units */
-export function replaceTable(text, units) {
-  const all = lines(text);
-  const rows = all.map((l, i) => (l.startsWith("|") ? i : -1)).filter((i) => i >= 0);
-  if (!rows.length) return text.trimEnd() + "\n\n" + renderTable(units) + "\n";
-  return [...all.slice(0, rows[0]), ...renderTable(units).split("\n"), ...all.slice(rows[rows.length - 1] + 1)].join("\n") + "\n";
-}
-
-/** @param {string} text @returns {Record<string, string>} */
-export function parseHeader(text) {
-  const head = partition(text, "\n## ")[0];
-  /** @type {Record<string, string>} */
-  const data = {};
-  for (const line of lines(head)) {
-    const [key, sep, value] = partition(line, ":");
-    if (sep && !/^[# -]/.test(line)) data[key.trim()] = value.trim();
-  }
-  return data;
-}
-
-/** @param {string} text @param {string} key @param {string} value */
-export function setHeader(text, key, value) {
-  const [head, sep, rest] = partition(text, "\n## ");
-  const all = lines(head);
-  const at = all.findIndex((l) => partition(l, ":")[0].trim() === key && !l.startsWith("#"));
-  if (at >= 0) all[at] = `${key}: ${value}`;
-  else all.splice(all.length > 1 ? 2 : all.length, 0, `${key}: ${value}`);
-  return all.join("\n") + sep + rest;
-}
-
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/** @param {string} text @param {string} name */
-export function section(text, name) {
-  const m = new RegExp(`^## ${escapeRe(name)}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, "m").exec(text);
-  return m ? m[1] : "";
-}
-
-/** @param {string} text */
-export const criteria = (text) => [...section(text, "Criteria").matchAll(/^- (C\d+):/gm)].map((m) => m[1]);
-
-/** (criterion, command) for every backticked `grep ...` in the Criteria section. @param {string} text */
-export function grepCriteria(text) {
-  /** @type {[string, string][]} */
-  const pairs = [];
-  for (const [, cid, body] of section(text, "Criteria").matchAll(/^- (C\d+):(.*)$/gm)) {
-    for (const [, cmd] of body.matchAll(/`(grep [^`]+)`/g)) pairs.push([cid, cmd]);
-  }
-  return pairs;
-}
-
-/** @param {string} output */
-export const grepHitFiles = (output) =>
-  [...new Set(lines(output).filter((l) => l.trim()).map((l) => partition(l, ":")[0]))].sort();
-
-/** Every file a grep criterion hits must sit in the scope of a unit that serves that criterion. */
-export function grepProblems(cid, files, units) {
-  const globs = units.filter((u) => splitList(u.criteria).includes(cid)).flatMap((u) => splitList(u.scope));
-  return files.filter((f) => !globs.some((g) => fnmatch(f, g)))
-    .map((f) => `${cid}: its grep hits ${f}, which no unit serving ${cid} has in scope`);
-}
-
-/** Units with an examiner finding not yet routed into their task by `amend`. @param {Entry[]} rows */
-export function openFindings(rows) {
-  const open = new Set();
-  for (const e of rows) {
-    if (e.event === "examiner-finding") open.add(e.subject);
-    else if (e.event === "amended") open.delete(e.subject);
-  }
-  return [...open].sort();
-}
-
-/** learn.md has a `## zerg` and a `## project` section; each body, or '' when it holds no proposal. */
-export function splitLanes(text) {
-  /** @type {Record<string, string>} */
-  const lanes = {};
-  for (const lane of ["zerg", "project"]) {
-    const body = section(text, lane).trim();
-    lanes[lane] = !body || ["none", "no proposals"].includes(body.toLowerCase().replace(/\.+$/, "")) ? "" : body;
-  }
-  return lanes;
-}
-
-/** Pending zerg proposals; id = '<source first word>/<goal>/<Pn>'. @param {string} text */
-export function parseInbox(text) {
-  const proposals = [];
-  for (const block of text.split(/^## /m).slice(1)) {
-    const [source, , rest] = partition(block, "\n");
-    const words = source.split(/\s+/).filter(Boolean);
-    for (const item of rest.split(/^### /m).slice(1)) {
-      const [title, , body] = partition(item, "\n");
-      const number = partition(title, ".")[0].trim();
-      proposals.push({ id: [...words.slice(0, 2), number].join("/"), source: source.trim(), title: title.trim(), body: body.trim() });
-    }
-  }
-  return proposals;
-}
-
-/** @param {{source: string, title: string, body: string}[]} proposals */
-export function renderInbox(proposals) {
-  const out = ["# inbox"];
-  for (const source of [...new Set(proposals.map((p) => p.source))]) {
-    out.push("", `## ${source}`);
-    for (const p of proposals.filter((p) => p.source === source)) out.push("", `### ${p.title}`, p.body);
-  }
-  return out.join("\n") + "\n";
-}
-
-/** @param {string[]} left @param {string[]} right */
-export const globsOverlap = (left, right) => left.some((a) => right.some((b) => fnmatch(a, b) || fnmatch(b, a)));
-
-/** @param {Unit[]} units */
-export function mergeOrder(units) {
-  const order = [];
-  const placed = new Set();
-  while (order.length < units.length) {
-    const batch = units.filter((u) => !placed.has(u.unit) && splitList(u.after).every((d) => placed.has(d))).map((u) => u.unit);
-    if (!batch.length) throw new Error("cycle");
-    order.push(...batch);
-    batch.forEach((b) => placed.add(b));
-  }
-  return order;
-}
-
-/** @param {Unit} unit @param {string[]} ids @param {string[]} crits */
-function rowProblems(unit, ids, crits) {
-  const uid = unit.unit;
-  return [
-    ...(splitList(unit.scope).length ? [] : [`${uid}: empty scope`]),
-    ...splitList(unit.after).filter((d) => !ids.includes(d)).map((d) => `${uid}: unknown after ${d}`),
-    ...splitList(unit.criteria).filter((c) => !crits.includes(c)).map((c) => `${uid}: unknown criterion ${c}`),
-  ];
-}
-
-/** @param {Unit[]} units @param {string[]} crits */
-function planProblems(units, crits) {
-  const ids = units.map((u) => u.unit);
-  const problems = units.length ? [] : ["plan: no units"];
-  problems.push(...[...new Set(ids.filter((i) => ids.indexOf(i) !== ids.lastIndexOf(i)))].sort().map((i) => `plan: duplicate unit ${i}`));
-  units.forEach((u) => problems.push(...rowProblems(u, ids, crits)));
-  const covered = new Set(units.flatMap((u) => splitList(u.criteria)));
-  problems.push(...crits.filter((c) => !covered.has(c)).map((c) => `plan: criterion ${c} has no unit`));
-  units.forEach((a, i) => units.slice(i + 1).forEach((b) => {
-    if (globsOverlap(splitList(a.scope), splitList(b.scope))) problems.push(`plan: scopes overlap: ${a.unit} and ${b.unit}`);
-  }));
-  try {
-    mergeOrder(units.filter((u) => splitList(u.after).every((d) => ids.includes(d))));
-  } catch {
-    problems.push("plan: after has a cycle");
-  }
-  return problems;
-}
-
-/** @param {string} text @param {Unit[]} units */
-export function lintProblems(text, units) {
-  const header = parseHeader(text);
-  const problems = SECTIONS.filter((s) => !section(text, s).trim()).map((s) => `contract: empty section ## ${s}`);
-  problems.push(...["base", "test"].filter((k) => !header[k]).map((k) => `contract: missing header ${k}`));
-  problems.push(...Object.entries(header).filter(([, v]) => v.startsWith("<") && v.endsWith(">"))
-    .map(([k]) => `contract: header ${k} is still a placeholder`));
-  const crits = criteria(text);
-  if (!crits.length) problems.push("contract: no criteria like '- C1: ...'");
-  return [...problems, ...planProblems(units, crits)];
-}
-
-/** @param {string} current @param {string} target */
-export const checkTransition = (current, target) =>
-  (TRANSITIONS[current] ?? []).includes(target) ? null : `illegal transition: ${current} -> ${target}`;
-
-/** Two strikes: a third failure, or the same failure word for word, makes the unit stuck. @param {Unit} unit */
-export function reviseUnit(unit, note, maxRevisions = BOUNDS.max_revisions) {
-  const text = clean(note);
-  const revisions = (parseInt(unit.revisions, 10) || 0) + 1;
-  const stuck = revisions > maxRevisions || text === unit.note;
-  return { ...unit, revisions: String(revisions), state: stuck ? "stuck" : "planned", note: text };
-}
-
-/** @param {Unit[]} units */
-export function blockedUnits(units) {
-  const byId = new Map(units.map((u) => [u.unit, u]));
-  return units.filter((u) => u.state === "planned" &&
-    splitList(u.after).some((d) => byId.has(d) && ["dropped", "stuck"].includes(byId.get(d).state))).map((u) => u.unit);
-}
-
-/** @param {Unit[]} units @param {number} maxParallel */
-export function readyUnits(units, maxParallel) {
-  const byId = new Map(units.map((u) => [u.unit, u]));
-  const busy = units.filter((u) => ["leased", "produced"].includes(u.state)).length;
-  const ready = units.filter((u) => u.state === "planned" &&
-    splitList(u.after).every((d) => !byId.has(d) || byId.get(d).state === "merged")).map((u) => u.unit);
-  return ready.slice(0, Math.max(0, maxParallel - busy));
-}
-
-/** Goal-level events that still hold. A fix unit reopens integration. @param {{event: string}[]} entries */
-export function goalEvents(entries) {
-  const events = new Set();
-  for (const e of entries) {
-    if (e.event === "reopened") ["integrated", "proved", "whole-blocking"].forEach((x) => events.delete(x));
-    events.add(e.event);
-  }
-  return events;
-}
-
-/** @param {{event: string, note: string}[]} entries */
-export const tokenTotal = (entries) =>
-  entries.filter((e) => e.event === "tokens").reduce((sum, e) => sum + parseInt(e.note.split(/\s+/).pop() ?? "0", 10), 0);
-
-/** @param {{event: string, note: string}[]} entries */
-export function boundHit(entries, budget, bounds = BOUNDS, current = null, unitCount = 0) {
-  const passes = entries.filter((e) => e.event === "pass");
-  const cap = bounds.max_passes + PASSES_PER_UNIT * unitCount;
-  if (passes.length >= cap) return `iteration cap: ${passes.length} passes (cap ${cap} for ${unitCount} units)`;
-  const window = bounds.no_progress;
-  const notes = passes.map((p) => p.note);
-  const recent = (current !== null ? [...notes, current] : notes).slice(-window);
-  if (recent.length === window && new Set(recent).size === 1) return `no progress: ${window} passes with the same state`;
-  const spent = tokenTotal(entries);
-  if (budget && spent >= budget) return `token budget spent: ${spent} of ${budget}`;
-  return null;
-}
-
-/** @param {Unit[]} units @param {string} state */
-const idsIn = (units, state) => units.filter((u) => u.state === state).map((u) => u.unit);
-
-/** Rows 0 to 5: gates before any unit work. */
-function deriveOpen(s) {
-  if (s.stop) return [0, "stop", ".swarm/STOP is present"];
-  if (s.bound) return [1, "stop", s.bound];
-  if (!s.has_contract) return [2, "scope", "run `new`, write contract.md and plan.md, then `lint`"];
-  if (!s.events.has("approved")) {
-    if (s.lint.length) return [2, "plan", s.lint.join("; ")];
-    return [3, "approve", "show `summary`; ask the human; then `approve`"];
-  }
-  if (!s.events.has("defined") || s.units.some((u) => !u.check && !CLOSED.includes(u.state))) {
-    return [4, "define", "run the examiner: `brief <goal> examiner`; it records its checks with `define`"];
-  }
-  if (s.open_findings?.length) return [4, "amend", s.open_findings.join(" ")];
-  if (!s.events.has("baseline")) {
-    return [5, "baseline", "run `baseline`; rerun the examiner with `Strengthen:` for any unit whose check passes"];
-  }
-  return null;
-}
-
-/** For a produced unit: what it needs next, from its log since it was last produced. @param {Entry[]} rows */
-export function unitPhase(rows, uid) {
-  const events = rows.filter((e) => e.subject === uid).map((e) => e.event);
-  const start = Math.max(0, events.lastIndexOf("produced"));
-  const since = events.slice(start);
-  return since.includes("review-pass") ? "merge" : since.includes("check-ok") ? "review" : "check";
-}
-
-/** Rows 6 to 9: the implement, check, review, merge loop. */
-function deriveUnits(s) {
-  const produced = idsIn(s.units, "produced");
-  for (const phase of ["check", "review", "merge"]) {
-    const due = produced.filter((uid) => s.phases[uid] === phase);
-    if (due.length) return [6, phase, due.join(" ")];
-  }
-  const leased = idsIn(s.units, "leased");
-  if (leased.length) return [7, "orphans", leased.join(" ")];
-  const ready = readyUnits(s.units, s.max_parallel);
-  if (ready.length) return [8, "implement", ready.join(" ")];
-  const stuck = [...idsIn(s.units, "stuck"), ...blockedUnits(s.units)];
-  if (stuck.length) return [9, s.autonomy === "auto" ? "auto-drop" : "interrupt", stuck.join(" ")];
-  return null;
-}
-
-/** Rows 10 to 15: integration to hand-off. */
-function deriveClose(s) {
-  const ev = s.events;
-  if (!ev.has("integrated")) return [10, "integrate", "run `integrate`"];
-  if (!ev.has("whole-review")) {
-    if (ev.has("whole-blocking")) {
-      if (s.fix_exists) return [9, "interrupt", "goal: a second blocking whole-review finding; ask the human"];
-      return [11, "add-fix", "run `add-fix` for the blocking finding in the log"];
-    }
-    return [11, "whole-review", "dispatch a verifier with `brief <goal> verifier whole`"];
-  }
-  if (s.unproven.length) return [12, "prove", s.unproven.join(" ")];
-  if (!ev.has("learned")) return [13, "learn", "write learn.md, then `stage learned`"];
-  if (!ev.has("handed-off")) return [14, "handoff", "run `handoff`"];
-  return [15, "done", "nothing left to do"];
-}
-
-/** The derive table: first match wins. @returns {[number, string, string]} */
-export const derive = (s) => deriveOpen(s) ?? deriveUnits(s) ?? deriveClose(s);
-
-/** Changes whenever anything but a pass or a token count is logged, so every check, review, or answer is progress. */
-export function fingerprint(units, rows) {
-  const work = rows.filter((e) => e.event !== "pass" && e.event !== "tokens").length;
-  return clean(units.map((u) => `${u.unit}:${u.state}:${u.revisions}`).join(",") + ` work:${work}`);
-}
-
-/** @param {string[]} changed @param {string[]} globs */
-export const scopeViolations = (changed, globs) => changed.filter((p) => !globs.some((g) => fnmatch(p, g)));
 
 // --- I/O ---
 
@@ -496,6 +133,24 @@ function run(command, cwd) {
 }
 
 const lastLine = (/** @type {string} */ text) => lines(text.trim()).pop() ?? "";
+
+/** The real path of p, following symlinks in whatever part of it exists already. */
+function realish(p) {
+  const full = path.resolve(p);
+  if (exists(full)) return fs.realpathSync(full);
+  const parent = path.dirname(full);
+  return parent === full ? full : path.join(realish(parent), path.basename(full));
+}
+
+/** A relative path that is empty, climbs out, or jumps to another root does not stay inside its base. */
+const escapes = (rel) => !rel || rel.startsWith("..") || path.isAbsolute(rel);
+
+/** Joins and refuses any result outside base, so no id or ref can point a write or a delete elsewhere. */
+function within(base, ...parts) {
+  const full = path.resolve(base, ...parts);
+  if (escapes(path.relative(base, full))) fail(`refusing a path outside ${base}: ${full}`);
+  return full;
+}
 const goalDir = (/** @type {string} */ goal) => path.join(root(), ".swarm", goal);
 
 function requireFile(goal, name) {
@@ -549,9 +204,16 @@ function require(goal, event) {
   if (!goalEvents(entries(goal)).has(event)) fail(`${goal}: \`${event}\` hasn't happened yet`);
 }
 
-/** Kept in the gitignored holdout dir, so no worktree and no worker ever sees it. */
+/** Outside the repo, so no test runner collects it and no worker or verifier working in the repo can read it. */
+function holdoutDir(goal) {
+  const key = `${path.basename(root())}-${createHash("sha1").update(root()).digest("hex").slice(0, 8)}`;
+  const dir = within(path.join(zergHome(), "holdout"), key, goal);
+  if (!path.relative(root(), realish(dir)).startsWith("..")) fail(`ZERG_HOME (${zergHome()}) is inside this repo; set it outside, or the holdout isn't hidden`);
+  return dir;
+}
+
 function holdoutCommand(goal) {
-  const file = path.join(goalDir(goal), "holdout", "command");
+  const file = path.join(holdoutDir(goal), "command");
   return exists(file) ? read(file).trim() : "";
 }
 
@@ -567,13 +229,13 @@ function dirtyPaths() {
     .filter((l) => l.trim()).map((l) => l.slice(3)).filter((p) => !NOT_TREE.some((n) => p.startsWith(n)));
 }
 
-const holdoutTracked = (goal) => Boolean(out(["ls-files", `.swarm/${goal}/holdout`]));
 
-function updateUnit(goal, uid, event, logNote = "", fields = {}) {
+/** Changes one unit's fields and logs why, in one step. */
+function updateUnit(goal, uid, { event, note = "", fields = {} }) {
   const units = loadUnits(goal);
   const unit = { ...getUnit(units, uid), ...fields };
   saveUnits(goal, putUnit(units, unit));
-  log(goal, uid, event, logNote);
+  log(goal, uid, event, note);
   return unit;
 }
 
@@ -581,7 +243,7 @@ function moveUnit(goal, uid, target, note = "") {
   const unit = getUnit(loadUnits(goal), uid);
   const error = checkTransition(unit.state, target);
   if (error) fail(`${uid}: ${error}`);
-  updateUnit(goal, uid, target, note, { state: target, note: clean(note) || unit.note });
+  updateUnit(goal, uid, { event: target, note, fields: { state: target, note: clean(note) || unit.note } });
   save(goal, `${uid} ${target}`);
   say(`${uid}: ${unit.state} -> ${target}`);
 }
@@ -627,7 +289,7 @@ function withStateLock(fn) {
   }
 }
 
-const worktreePath = (goal, uid) => path.join(root(), ".swarm", ".work", goal, uid);
+const worktreePath = (goal, uid) => within(path.join(root(), ".swarm", ".work"), goal, uid);
 
 /** @returns {Record<string, string>[]} */
 function worktrees() {
@@ -663,12 +325,15 @@ function ensureIgnores() {
 const zergHome = () => process.env.ZERG_HOME || path.join(os.homedir(), ".zerg");
 const inboxPath = () => path.join(zergHome(), "inbox.md");
 
+/** A known bound with a whole value of 1 or more. A no-progress window of 1 would stop every pass, so it needs 2. */
+const isBound = (key, value) => key in BOUNDS && /^\d+$/.test(value) && parseInt(value, 10) >= (key === "no_progress" ? 2 : 1);
+
 export function userBounds() {
   const file = path.join(zergHome(), "config");
   const values = {};
   for (const line of exists(file) ? lines(read(file)) : []) {
     const [key, sep, value] = partition(line, ":");
-    if (sep && key.trim() in BOUNDS && /^\d+$/.test(value.trim())) values[key.trim()] = parseInt(value.trim(), 10);
+    if (sep && isBound(key.trim(), value.trim())) values[key.trim()] = parseInt(value.trim(), 10);
   }
   return { ...BOUNDS, ...values };
 }
@@ -720,9 +385,7 @@ function cmdDismiss(pid, ...reason) {
 }
 
 function cmdConfig(key, value = "") {
-  if (!(key in BOUNDS) || !/^\d+$/.test(value) || parseInt(value, 10) < 1) {
-    fail(`config takes one of ${Object.keys(BOUNDS).join(", ")} and a whole number of 1 or more`);
-  }
+  if (!isBound(key, value)) fail(`config takes one of ${Object.keys(BOUNDS).join(", ")} and a whole number (no_progress needs 2 or more)`);
   const file = path.join(zergHome(), "config");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const kept = (exists(file) ? lines(read(file)) : []).filter((l) => partition(l, ":")[0].trim() !== key);
@@ -735,7 +398,8 @@ function cmdConfig(key, value = "") {
 function cmdNew(goal) {
   const dir = goalDir(goal);
   if (exists(dir)) fail(`${goal} already exists`);
-  fs.mkdirSync(path.join(dir, "holdout"), { recursive: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(holdoutDir(goal), { recursive: true });
   const contract = read(path.join(TEMPLATES, "contract.md")).replaceAll("<goal>", goal);
   write(path.join(dir, "contract.md"), setHeader(contract, "base", branch()));
   write(path.join(dir, "plan.md"), read(path.join(TEMPLATES, "plan.md")).replaceAll("<goal>", goal));
@@ -745,7 +409,12 @@ function cmdNew(goal) {
 }
 
 function runGrepCriteria(text, units) {
-  return grepCriteria(text).flatMap(([cid, command]) => grepProblems(cid, grepHitFiles(run(command, root())[1]), units));
+  return grepCriteria(text).flatMap(([cid, command]) => {
+    const argv = grepArgv(command);
+    if (!argv) return [`${cid}: a grep criterion must be one plain grep command, with no shell operators`];
+    const proc = spawnSync(argv[0], argv.slice(1), { cwd: root(), encoding: "utf8" });
+    return grepProblems(cid, grepHitFiles(proc.stdout ?? ""), units);
+  });
 }
 
 function allPlanProblems(goal) {
@@ -791,43 +460,56 @@ function foreignDefineChanges(goal, units) {
   return dirtyPaths().filter((p) => stateFiles.includes(p) || scopes.some((g) => fnmatch(p, g)));
 }
 
+/** Parses define's pairs and checks all of them before anything is written. */
+function defineInput(units, pairs) {
+  const input = { checks: new Map(), findings: [], holdout: null };
+  for (const pair of pairs) {
+    const [key, sep, value] = partition(pair, "=");
+    if (!sep) fail(`define takes key=value pairs, not ${JSON.stringify(pair)}`);
+    addDefinePair(input, units, key, value);
+  }
+  return input;
+}
+
+function addDefinePair(input, units, key, value) {
+  if (key === "holdout") return void (input.holdout = value);
+  if (key.startsWith("finding:")) return void input.findings.push([getUnit(units, partition(key, ":")[2]).unit, value]);
+  getUnit(units, key);
+  if (value.includes("|")) fail(`${key}: a check command can't contain '|'`);
+  input.checks.set(key, value);
+}
+
+const examinerFiles = (goal) =>
+  [...new Set(entries(goal).filter((e) => e.event === "test-files").flatMap((e) => splitList(e.note)))];
+
 function cmdDefine(goal, ...pairs) {
   require(goal, "approved");
   onSwarm(goal);
   let units = loadUnits(goal);
   const foreign = foreignDefineChanges(goal, units);
   if (foreign.length) fail("the examiner changed product or state files: " + foreign.join(", "));
-  if (holdoutTracked(goal)) fail(`holdout tests are tracked by git; untrack them, ${IGNORES[0]} must stay ignored`);
-  const assigns = new Map(pairs.map((pair) => { const [k, , v] = partition(pair, "="); return [k, v]; }));
-  for (const key of [...assigns.keys()].filter((k) => k.startsWith("finding:"))) {
-    const uid = partition(key, ":")[2];
-    getUnit(units, uid);
-    log(goal, uid, "examiner-finding", assigns.get(key));
-    assigns.delete(key);
-  }
-  if (assigns.has("holdout")) {
-    fs.mkdirSync(path.join(goalDir(goal), "holdout"), { recursive: true });
-    write(path.join(goalDir(goal), "holdout", "command"), assigns.get("holdout") + "\n");
-    assigns.delete("holdout");
-  }
-  for (const [uid, command] of assigns) {
-    if (command.includes("|")) fail(`${uid}: a check command can't contain '|'`);
-    units = putUnit(units, { ...getUnit(units, uid), check: command });
-  }
+  const { checks, findings, holdout } = defineInput(units, pairs);
+  const written = dirtyPaths().filter((p) => !p.startsWith(`.swarm/${goal}/`));
+  const secrets = written.filter((p) => SECRET.test(p));
+  if (secrets.length) fail(`refusing to commit files that look like secrets: ${secrets.join(", ")}`);
+  for (const [uid, command] of checks) units = putUnit(units, { ...getUnit(units, uid), check: command });
   saveUnits(goal, units);
-  const named = [...assigns.keys()].join(", ");
-  git(["add", "-A"]);
-  git(["commit", "-q", "-m", `swarm ${goal}: tests for ${named || "holdout"}`]);
+  if (holdout !== null) write(path.join(holdoutDir(goal), "command"), holdout + "\n");
+  findings.forEach(([uid, text]) => log(goal, uid, "examiner-finding", text));
+  if (written.length) {
+    log(goal, goal, "test-files", written.join(", "));
+    git(["add", "--", ...written]);
+  }
   if (units.every((u) => u.check || CLOSED.includes(u.state))) log(goal, goal, "defined");
-  save(goal, "defined");
-  say(`checks recorded for ${named || "none"}`);
+  save(goal, `tests for ${[...checks.keys()].join(", ") || "holdout"}`);
+  say(`checks recorded for ${[...checks.keys()].join(", ") || "none"}`);
 }
 
 function baselineUnit(goal, unit, earlier) {
   if (!run(unit.check, root())[0]) return null;
   if (earlier.includes(unit.unit)) {
-    updateUnit(goal, unit.unit, "stuck", "tests pass before any change, twice",
-      { state: "stuck", note: "tests pass before any change; the examiner could not strengthen them" });
+    updateUnit(goal, unit.unit, { event: "stuck", note: "tests pass before any change, twice",
+      fields: { state: "stuck", note: "tests pass before any change; the examiner could not strengthen them" } });
     return null;
   }
   log(goal, unit.unit, "baseline-pass");
@@ -863,7 +545,7 @@ function currentRow(goal) {
   const proven = new Set(rows.filter((e) => e.event === "proof").map((e) => e.subject));
   const now = fingerprint(units, rows);
   const state = {
-    stop: stopped(), bound: boundHit(rows, budget(goal), userBounds(), now, units.length), has_contract: true,
+    stop: stopped(), bound: boundHit(rows, { budget: budget(goal), bounds: userBounds(), current: now, unitCount: units.length }), has_contract: true,
     lint: lintProblems(text, units), events: goalEvents(rows), units,
     max_parallel: parseInt(header.max_parallel, 10) || 3, autonomy: header.autonomy || "ask",
     unproven: criteria(text).filter((c) => !proven.has(c)),
@@ -897,25 +579,28 @@ function cmdLease(goal, ...uids) {
   const ready = readyUnits(loadUnits(goal), parseInt(parseHeader(contractText(goal)).max_parallel, 10) || 3);
   const notReady = uids.filter((u) => !ready.includes(u));
   if (notReady.length) fail(`not ready to lease: ${notReady.join(", ")} (ready: ${ready.join(", ") || "none"})`);
-  uids.forEach((uid) => updateUnit(goal, uid, "leased", "", { state: "leased" }));
+  uids.forEach((uid) => updateUnit(goal, uid, { event: "leased", fields: { state: "leased" } }));
   save(goal, `lease ${uids.join(" ")}`);
   uids.forEach((uid) => say(`leased ${uid}: worktree ${makeWorktree(goal, uid)}`));
 }
 
-function cmdProduced(goal, uid, summary = "") {
-  if (getUnit(loadUnits(goal), uid).state !== "leased") fail(`${uid} is not leased`);
+function commitsAhead(goal, uid) {
   const ref = `unit/${goal}/${uid}`;
   const known = git(["rev-parse", "--verify", "--quiet", ref], { check: false }).code === 0;
-  const ahead = known ? parseInt(out(["rev-list", "--count", `swarm/${goal}..${ref}`]), 10) : 0;
-  if (!ahead) {
-    revise(goal, uid, `worker reported produced, but ${ref} has no commits`);
+  return known ? parseInt(out(["rev-list", "--count", `swarm/${goal}..${ref}`]), 10) : 0;
+}
+
+function cmdProduced(goal, uid, summary = "") {
+  if (getUnit(loadUnits(goal), uid).state !== "leased") fail(`${uid} is not leased`);
+  if (!commitsAhead(goal, uid)) {
+    revise(goal, uid, `worker reported produced, but unit/${goal}/${uid} has no commits`);
     exit(1);
   }
   moveUnit(goal, uid, "produced", summary);
 }
 
 function runInWorktree(ref, command) {
-  const tree = path.join(root(), ".swarm", ".tmp", ref.replaceAll("/", "-"));
+  const tree = within(path.join(root(), ".swarm", ".tmp"), ref.replaceAll("/", "-"));
   git(["worktree", "remove", "--force", tree], { check: false });
   rmrf(tree);
   git(["worktree", "add", "-q", "--detach", tree, ref]);
@@ -932,9 +617,10 @@ function cmdCheck(goal, uid) {
   const ref = `unit/${goal}/${uid}`;
   const changed = lines(out(["diff", "--name-only", `swarm/${goal}...${ref}`]));
   const violations = scopeViolations(changed, splitList(unit.scope));
+  const touched = testViolations(changed, examinerFiles(goal));
   const [ok, output] = runInWorktree(ref, unit.check);
-  const problem = !changed.length ? "no changes" : violations.length ? `outside scope: ${violations.join(", ")}`
-    : ok ? null : `check fails: ${lastLine(output)}`;
+  const problem = !changed.length ? "no changes" : touched.length ? `changes the examiner's tests: ${touched.join(", ")}`
+    : violations.length ? `outside scope: ${violations.join(", ")}` : ok ? null : `check fails: ${lastLine(output)}`;
   say(json({ ok: problem === null, changed, scope_violations: violations, check: ok ? "pass" : "fail", output: ok ? "" : output }));
   if (problem) {
     revise(goal, uid, problem);
@@ -946,12 +632,15 @@ function cmdCheck(goal, uid) {
 
 /** Checks do not repair: undo anything a verifier wrote, and say so. */
 function restoreAfterVerifier(goal) {
-  const dirty = dirtyPaths().filter((p) => !p.startsWith(`.swarm/${goal}/`));
+  // State files count: every script write is committed at once, so any diff in .swarm/<goal>/ came from a role.
+  const dirty = dirtyPaths();
   if (!dirty.length) return;
   const tracked = dirty.filter((p) => out(["ls-files", "--", p]));
   if (tracked.length) git(["restore", "--staged", "--worktree", "--", ...tracked], { check: false });
   const leftover = dirty.filter((p) => !tracked.includes(p));
   log(goal, goal, "verifier-wrote", dirty.join(", "));
+  git(["add", "--", path.join(".swarm", goal, "log.md")]);
+  git(["commit", "-q", "-m", `swarm ${goal}: restore after a verifier write`]);
   fail(`a verifier changed the tree (${dirty.join(", ")}); tracked files restored` +
     (leftover.length ? `; remove these untracked files by hand: ${leftover.join(", ")}` : "") + ". Rerun that verifier once.");
 }
@@ -959,10 +648,15 @@ function restoreAfterVerifier(goal) {
 /** A worker reports its own result. Its worktree goes away; only commits on its branch count. */
 function cmdReport(goal, uid, outcome, ...text) {
   if (!["produced", "escalated", "gave_up"].includes(outcome)) fail("report outcome is produced, escalated, or gave_up");
+  const state = getUnit(loadUnits(goal), uid).state;
+  if (state !== "leased") fail(`${uid} is ${state}, not leased, so this report is stale; nothing was changed`);
+  if (outcome === "produced" && !commitsAhead(goal, uid)) {
+    fail(`unit/${goal}/${uid} has no commits. Commit your work in the worktree, then report again; the worktree is kept`);
+  }
   const note = text.join(" ");
   removeWorktreeFor(`unit/${goal}/${uid}`);
   rmrf(worktreePath(goal, uid));
-  if (outcome === "produced") cmdProduced(goal, uid, note);
+  if (outcome === "produced") moveUnit(goal, uid, "produced", note);
   else if (outcome === "escalated") moveUnit(goal, uid, "stuck", `question: ${note}`);
   else revise(goal, uid, `gave up: ${note}`);
 }
@@ -970,6 +664,7 @@ function cmdReport(goal, uid, outcome, ...text) {
 /** A verifier records its verdict. It may not have changed anything else in the tree. */
 function cmdReview(goal, subject, verdict, ...reason) {
   if (!["pass", "fail"].includes(verdict)) fail("review verdict is pass or fail");
+  onSwarm(goal);
   const note = reason.join(" ");
   restoreAfterVerifier(goal);
   if (subject === "whole") {
@@ -993,6 +688,7 @@ function cmdBrief(goal, role, uid = "-") {
   const text = [`You are the zerg ${role}. Read ${path.join(SKILL_DIR, "references", role + ".md")} and follow it exactly.`,
     `Goal: ${goal}`, `Unit: ${uid}`, `MAIN: ${root()}`, `S: node ${SCRIPT}`];
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
+  if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
   say(text.join("\n"));
 }
 
@@ -1042,7 +738,7 @@ function cmdAnswer(goal, subject, ...words) {
   if (subject !== "goal") {
     const unit = getUnit(loadUnits(goal), subject);
     if (unit.state !== "stuck") fail(`${subject} is ${unit.state}, not stuck`);
-    updateUnit(goal, subject, "answered", text, { state: "planned", revisions: "0", note: `answered: ${text}` });
+    updateUnit(goal, subject, { event: "answered", note: text, fields: { state: "planned", revisions: "0", note: `answered: ${text}` } });
   } else log(goal, goal, "answered", text);
   save(goal, `decision for ${subject}`);
   say(`recorded decision for ${subject}`);
@@ -1053,7 +749,7 @@ function cmdAmend(goal, uid, ...words) {
   const text = clean(words.join(" "));
   const unit = getUnit(loadUnits(goal), uid);
   if (unit.state !== "planned") fail(`${uid} is ${unit.state}; amend a task only before its unit is leased`);
-  updateUnit(goal, uid, "amended", text, { task: `${unit.task}. Also: ${text}` });
+  updateUnit(goal, uid, { event: "amended", note: text, fields: { task: `${unit.task}. Also: ${text}` } });
   save(goal, `amend ${uid}`);
   say(`${uid}: task amended`);
 }
@@ -1069,7 +765,7 @@ function cmdRescope(goal, uid, scope, ...reason) {
   const text = reason.join(" ") || "human decision";
   const contract = path.join(goalDir(goal), "contract.md");
   write(contract, read(contract).trimEnd() + `\n- ${uid}: scope is now ${clean(scope)}: ${clean(text)}\n`);
-  updateUnit(goal, uid, "rescoped", `${scope}: ${text}`, { scope, state: "planned", revisions: "0", note: `rescoped: ${text}` });
+  updateUnit(goal, uid, { event: "rescoped", note: `${scope}: ${text}`, fields: { scope, state: "planned", revisions: "0", note: `rescoped: ${text}` } });
   save(goal, `rescope ${uid}`);
   say(`${uid}: scope ${scope}; back to planned`);
 }
@@ -1094,7 +790,6 @@ function cmdIntegrate(goal) {
   onSwarm(goal);
   const open = loadUnits(goal).filter((u) => !CLOSED.includes(u.state)).map((u) => u.unit);
   if (open.length) fail(`units still open: ${open.join(", ")}`);
-  if (holdoutTracked(goal)) fail("holdout tests are tracked by git");
   const [suiteOk, output] = run(parseHeader(contractText(goal)).test, root());
   const holdout = holdoutCommand(goal);
   const holdoutOk = holdout ? run(holdout, root())[0] : true;
@@ -1226,22 +921,32 @@ const COMMANDS = {
   next: cmdNext, peek: cmdPeek, report: cmdReport, review: cmdReview, brief: cmdBrief, summary: cmdSummary,
   lease: cmdLease, produced: cmdProduced, check: cmdCheck, merge: cmdMerge,
   revise: (goal, uid, ...note) => revise(goal, uid, note.join(" ")),
-  move: (goal, uid, target, ...note) => moveUnit(goal, uid, target, note.join(" ")),
+  move: (goal, uid, target, ...note) => {
+    const state = getUnit(loadUnits(goal), uid).state;
+    if (!MANUAL_MOVES.includes(`${state}>${target}`)) {
+      fail(`move only handles a lost lease (leased -> planned) and a drop (planned or stuck -> dropped), not ${state} -> ${target}`);
+    }
+    moveUnit(goal, uid, target, note.join(" "));
+  },
   answer: cmdAnswer, rescope: cmdRescope, amend: cmdAmend, "add-fix": cmdAddFix,
   integrate: cmdIntegrate, prove: cmdProve, stage: cmdStage, tokens: cmdTokens, status: cmdStatus, handoff: cmdHandoff,
 };
+
+function dispatch(command, args) {
+  if (command in USER_COMMANDS) return USER_COMMANDS[command](...args);
+  if (!(command in COMMANDS) || !args.length) fail(USAGE);
+  const problem = argProblem(command, args);
+  if (problem) fail(problem);
+  // A worker calls `report` from its own worktree, which `report` deletes. Work from the main tree.
+  process.chdir(root());
+  return LOCK_FREE.has(command) ? COMMANDS[command](...args) : withStateLock(() => COMMANDS[command](...args));
+}
 
 /** @param {string[]} argv */
 export function main(argv) {
   const [command = "", ...args] = argv;
   try {
-    if (command in USER_COMMANDS) USER_COMMANDS[command](...args);
-    else if (command in COMMANDS && args.length) {
-      // A worker calls `report` from its own worktree, which `report` deletes. Work from the main tree.
-      process.chdir(root());
-      if (LOCK_FREE.has(command)) COMMANDS[command](...args);
-      else withStateLock(() => COMMANDS[command](...args));
-    } else fail(USAGE);
+    dispatch(command, args);
     return 0;
   } catch (error) {
     if (!(error instanceof Exit)) throw error;
