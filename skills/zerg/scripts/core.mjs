@@ -27,7 +27,7 @@ export const TRANSITIONS = {
 };
 export const CLOSED = ["merged", "dropped"];
 // Defaults. A user's ~/.zerg/config (or $ZERG_HOME/config) overrides them without a skill update.
-export const BOUNDS = { max_revisions: 2, max_passes: 20, no_progress: 3 };
+export const BOUNDS = { max_revisions: 2, max_passes: 20, no_progress: 3, lease_minutes: 60 };
 // A clean unit still takes about 4 passes (implement, check, review, merge), so the cap grows with the plan.
 export const PASSES_PER_UNIT = 5;
 
@@ -283,11 +283,13 @@ export const ARG_KINDS = {
   "unit|goal": (id) => id === "goal" || isUnitId(id),
   "unit|-": (id) => id === undefined || id === "-" || id === "whole" || isUnitId(id),
   word: (id) => /^[\w.-]+$/.test(id ?? ""),
+  "criterion|whole": (id) => id === "whole" || /^C\d+$/.test(id ?? ""),
 };
 /** What each command's arguments after the goal must be. A null slot is free text. */
 export const ARG_SHAPES = {
   report: ["unit"], produced: ["unit"], check: ["unit"], merge: ["unit"], revise: ["unit"], move: ["unit"],
   amend: ["unit"], rescope: ["unit"], review: ["unit|whole"], answer: ["unit|goal"], brief: [null, "unit|-"], tokens: ["word"],
+  waive: ["criterion|whole"],
 };
 
 /** Every id a command receives, checked before it can reach a path, a branch name, or rm. */
@@ -297,7 +299,8 @@ export function argProblem(command, args) {
   const shape = command === "lease" ? rest.map(() => "unit") : ARG_SHAPES[command] ?? [];
   const at = shape.findIndex((kind, i) => kind && !ARG_KINDS[kind](rest[i]));
   if (at < 0) return null;
-  const what = shape[at] === "word" ? "token subject must be a plain word" : "unit id must look like U-001 or F-1";
+  const what = { word: "token subject must be a plain word", "criterion|whole": "waive takes a criterion like C1, or whole" }[shape[at]]
+    ?? "unit id must look like U-001 or F-1";
   return `${what}, not ${JSON.stringify(rest[at] ?? "")}`;
 }
 
@@ -369,11 +372,27 @@ export function reviseUnit(unit, note, maxRevisions = BOUNDS.max_revisions) {
 }
 
 /** @param {Unit[]} units */
-export function blockedUnits(units) {
+/** Planned units waiting on a dependency that is stuck or dropped, with the dependencies that block them. */
+export function blockers(units) {
   const byId = new Map(units.map((u) => [u.unit, u]));
-  return units.filter((u) => u.state === "planned" &&
-    splitList(u.after).some((d) => byId.has(d) && ["dropped", "stuck"].includes(byId.get(d).state))).map((u) => u.unit);
+  const blocking = (u) => splitList(u.after).filter((d) => byId.has(d) && ["dropped", "stuck"].includes(byId.get(d).state));
+  return new Map(units.filter((u) => u.state === "planned" && blocking(u).length).map((u) => [u.unit, blocking(u)]));
 }
+
+/** @param {Unit[]} units */
+export const blockedUnits = (units) => [...blockers(units).keys()];
+
+/** Row 9's detail: which units are stuck, and which wait on them. A blocked unit is resolved through its blocker. */
+export function stuckDetail(units) {
+  const stuck = idsIn(units, "stuck").map((uid) => `${uid} (stuck)`);
+  const blocked = [...blockers(units)].map(([uid, deps]) => `${uid} (blocked by ${deps.join(", ")})`);
+  return [...stuck, ...blocked].join(" ");
+}
+
+/** A lease is orphaned when its worktree is gone or it has outlived lease_minutes; otherwise its worker is still working.
+ * @param {{unit: string, worktree: boolean, minutes: number}[]} leases */
+export const orphanedLeases = (leases, maxMinutes) =>
+  leases.filter((l) => !l.worktree || l.minutes > maxMinutes).map((l) => l.unit);
 
 /** @param {Unit[]} units @param {number} maxParallel */
 export function readyUnits(units, maxParallel) {
@@ -388,7 +407,7 @@ export function readyUnits(units, maxParallel) {
 export function goalEvents(entries) {
   const events = new Set();
   for (const e of entries) {
-    if (e.event === "reopened") ["integrated", "proved", "whole-blocking"].forEach((x) => events.delete(x));
+    if (e.event === "reopened") ["integrated", "integrate-failed", "proved", "whole-blocking", "whole-review"].forEach((x) => events.delete(x));
     events.add(e.event);
   }
   return events;
@@ -452,22 +471,26 @@ export function deriveUnits(s) {
     const due = produced.filter((uid) => s.phases[uid] === phase);
     if (due.length) return [6, phase, due.join(" ")];
   }
-  const leased = idsIn(s.units, "leased");
-  if (leased.length) return [7, "orphans", leased.join(" ")];
+  const orphans = s.orphans ?? idsIn(s.units, "leased");
+  if (orphans.length) return [7, "orphans", orphans.join(" ")];
   const ready = readyUnits(s.units, s.max_parallel);
   if (ready.length) return [8, "implement", ready.join(" ")];
-  const stuck = [...idsIn(s.units, "stuck"), ...blockedUnits(s.units)];
-  if (stuck.length) return [9, s.autonomy === "auto" ? "auto-drop" : "interrupt", stuck.join(" ")];
+  const leased = idsIn(s.units, "leased");
+  if (leased.length) return [7, "wait", `${leased.join(" ")} still leased; wait for those workers to report`];
+  const detail = stuckDetail(s.units);
+  if (detail) return [9, s.autonomy === "auto" ? "auto-drop" : "interrupt", detail];
   return null;
 }
 
 /** Rows 10 to 15: integration to hand-off. */
 export function deriveClose(s) {
   const ev = s.events;
+  // Goal-level decisions belong to the human under every autonomy setting: auto only drops units.
+  if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, or stop"];
   if (!ev.has("integrated")) return [10, "integrate", "run `integrate`"];
   if (!ev.has("whole-review")) {
     if (ev.has("whole-blocking")) {
-      if (s.fix_exists) return [9, "interrupt", "goal: a second blocking whole-review finding; ask the human"];
+      if (s.fix_exists) return [9, "interrupt", "goal: the whole review is blocking again; `reopen`, `waive <goal> whole`, or stop"];
       return [11, "add-fix", "run `add-fix` for the blocking finding in the log"];
     }
     return [11, "whole-review", "dispatch a verifier with `brief <goal> verifier whole`"];

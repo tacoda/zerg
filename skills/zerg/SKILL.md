@@ -32,7 +32,8 @@ The roles do the work: the examiner writes tests, workers write code, and verifi
 Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 
 - **If your agent has subagents,** start a fresh one per handoff and give it exactly that text. Run the workers
-  for one `implement` row, and the verifiers for one `review` row, in parallel.
+  for one `implement` row, and the verifiers for one `review` row, in parallel. Wait until every role in the row
+  has reported before you run `S next` again.
 - **If it doesn't,** do the role yourself: read the role file the brief names and follow it. Treat it as a
   fresh start, and re-read the files instead of trusting what you remember. Be aware that one agent playing
   both worker and verifier is weaker review than two separate agents. Say so in the hand-off.
@@ -47,19 +48,20 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 | 2 | `scope`, `plan` | Plan the goal (see Planning). |
 | 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
 | 4 | `define` | Run the examiner: `S brief <goal> examiner`. It records its checks with `S define`. |
-| 4 | `amend` | For each unit listed, run `S amend <goal> <unit> "<finding>"`, using the finding from `log.md`. If a finding needs a file outside the unit's scope, ask the human. |
+| 4 | `amend` | For each unit listed, run `S amend <goal> <unit> "<finding>"`, using the finding from `log.md`. If a finding needs a file outside the unit's scope, ask the human, who can `rescope` the unit. |
 | 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again with `Strengthen: <units>` added to its brief. |
 | 6 | `check` | Run `S check <goal> <unit>` for each unit. Failures revise themselves. |
 | 6 | `review` | Run a verifier per unit: `S brief <goal> verifier <unit>`. It records its verdict with `S review`. |
 | 6 | `merge` | Run `S merge <goal> <unit>` for each unit. |
-| 7 | `orphans` | For each unit: `S move <goal> <unit> planned "lease lost"`. `move` handles only this and drops; every other state change goes through its gate. |
+| 7 | `orphans` | A listed lease lost its worktree or outlived `lease_minutes`. For each unit: `S move <goal> <unit> planned "lease lost"`. `move` handles only this and drops; every other state change goes through its gate. |
+| 7 | `wait` | Workers still hold leases. Wait for them to report, then run `S next` again. |
 | 8 | `implement` | Run `S lease <goal> <units>`, then a worker per unit: `S brief <goal> worker <unit>`. Each records its result with `S report`. |
-| 9 | `interrupt` | Read each listed unit's `note` in `plan.md`. Ask the human one question per unit (see Asking). |
-| 9 | `auto-drop` | For each unit: `S move <goal> <unit> dropped "auto: <note>"`. |
-| 10 | `integrate` | Run `S integrate <goal>`. If it fails, ask the human, and report holdout as pass or fail only. |
+| 9 | `interrupt` | For each unit marked `(stuck)`, read its `note` in `plan.md` and ask the human one question (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
+| 9 | `auto-drop` | For each listed unit: `S move <goal> <unit> dropped "auto: <note>"`. Goal-level questions are never auto-dropped; they always come as `interrupt`. |
+| 10 | `integrate` | Run `S integrate <goal>`. Report holdout as pass or fail only. A failure becomes a goal-level `interrupt` on the next pass. |
 | 11 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. It records the result with `S review <goal> whole`. Log each advisory finding with `S stage <goal> finding "<text>"`. |
-| 11 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. |
-| 12 | `prove` | For each criterion listed, run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves a criterion, ask the human. |
+| 11 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
+| 12 | `prove` | For each criterion listed, run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves a criterion, ask the human, who can `waive` it or `reopen` the goal. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
 | 14 | `handoff` | Run `S handoff <goal>` and print its report. Stop. |
 
@@ -88,8 +90,11 @@ Record answers through the script, never by editing files:
 |---|---|
 | a decision for the goal | `S answer <goal> goal "<q>: <a>"` |
 | a decision for a unit | `S answer <goal> <unit> "<text>"` |
-| widen a unit's scope | `S rescope <goal> <unit> "<scope>" "<why>"` |
+| change a stuck or planned unit's scope | `S rescope <goal> <unit> "<scope>" "<why>"` |
 | drop a unit | `S move <goal> <unit> dropped "<why>"` |
+| fix after a goal-level failure | `S reopen <goal> "<task>" "<scope>" "<why>"` |
+| accept a criterion without proof | `S waive <goal> <C> "<why>"` |
+| accept the whole change despite a blocking review | `S waive <goal> whole "<why>"` |
 
 ## Learning (row 13)
 
@@ -119,5 +124,5 @@ The user layer (`S home`) lives outside this skill, so lessons survive every upd
 ## Bounds
 
 `S next` enforces these: 2 revisions per unit, a word-for-word repeat goes straight to stuck, 3 passes with no
-progress, 20 passes plus 5 per unit in total, an optional `token_budget`, and `.swarm/STOP`. The user's `S config` can change
-the first three.
+progress, 20 passes plus 5 per unit in total, leases that expire after 60 minutes, an optional `token_budget`, and
+`.swarm/STOP`. `S config` changes `max_revisions`, `max_passes`, `no_progress` (2 or more), and `lease_minutes`.

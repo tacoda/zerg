@@ -27,6 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
+  blockers, orphanedLeases, stuckDetail,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -52,9 +53,11 @@ const USAGE = `zerg control plane
   merge <goal> <unit>                 needs a recorded pass; merges, re-runs merged checks; rolls back on red
   revise <goal> <unit> <note>         two strikes, or the same note word for word, makes it stuck
   move <goal> <unit> <state> [note]   by hand only: leased -> planned (lease lost), planned|stuck -> dropped
-  answer <goal> <unit|goal> <text>    record a human decision in the contract; unit back to planned
-  rescope <goal> <unit> <scope> [why] a human decision: new scope for a stuck unit
-  add-fix <goal> <task> <scope>       one fix unit for a blocking whole-review finding
+  answer <goal> <unit|goal> <text>    a human decision; a stuck unit goes back to planned
+  rescope <goal> <unit> <scope> [why] a human decision: new scope for a stuck or planned unit
+  reopen <goal> <task> <scope> [why]  a human decision: a fix unit after a goal-level failure
+  waive <goal> <C|whole> <why>        a human decision: accept a criterion, or the whole change, without proof
+  add-fix <goal> <task> <scope>       the orchestrator's one automatic fix for a blocking whole review
   integrate <goal>                    full suite + holdout; holdout reports pass/fail only
   prove <goal> <criterion> <cmd..>    run evidence for one criterion; all proven -> proved
   stage <goal> whole-review|learned|finding [note]   \`learned\` routes learn.md: project lane to
@@ -97,7 +100,12 @@ function exit(code) {
 const say = (/** @type {string} */ text) => console.log(text);
 const exists = (/** @type {string} */ p) => fs.existsSync(p);
 const read = (/** @type {string} */ p) => fs.readFileSync(p, "utf8");
-const write = (/** @type {string} */ p, /** @type {string} */ text) => fs.writeFileSync(p, text);
+/** Writes through a temp file and a rename, so a lock-free reader never sees half a file. */
+function write(/** @type {string} */ p, /** @type {string} */ text) {
+  const tmp = `${p}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, p);
+}
 const rmrf = (/** @type {string} */ p) => fs.rmSync(p, { recursive: true, force: true });
 const pad2 = (/** @type {number} */ n) => String(n).padStart(2, "0");
 function stamp(withTime = true) {
@@ -194,10 +202,15 @@ function onSwarm(goal) {
   if (branch() !== `swarm/${goal}`) fail(`check out swarm/${goal} first (on ${branch() || "detached HEAD"})`);
 }
 
+/** Commits zerg's own state. A user's hooks and commit signing are for their code, not for this bookkeeping. */
+function commitState(message) {
+  git(["-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", message]);
+}
+
 function save(goal, message) {
   if (branch() !== `swarm/${goal}`) return;
   git(["add", "--", `.swarm/${goal}`]);
-  if (git(["diff", "--cached", "--quiet"], { check: false }).code !== 0) git(["commit", "-q", "-m", `swarm ${goal}: ${message}`]);
+  if (git(["diff", "--cached", "--quiet"], { check: false }).code !== 0) commitState(`swarm ${goal}: ${message}`);
 }
 
 function require(goal, event) {
@@ -259,33 +272,48 @@ function revise(goal, uid, note) {
   say(`${uid}: revision ${unit.revisions} -> ${unit.state}: ${unit.note}`);
 }
 
+const LOCK_OWNER = `${process.pid}@${os.hostname()}`;
+
+/** True when no live process owns the lock: a dead pid on this host, or an old lock from another host. */
+function lockIsStale(lock) {
+  const [pid, host] = partition(read(lock).trim(), "@").filter((_, i) => i !== 1);
+  if (host !== os.hostname()) return Date.now() - fs.statSync(lock).mtimeMs > 1_800_000;
+  try {
+    process.kill(parseInt(pid, 10), 0);
+    return false;
+  } catch (error) {
+    return /** @type {any} */ (error).code === "ESRCH";
+  }
+}
+
+function takeLock(lock) {
+  try {
+    fs.writeFileSync(lock, LOCK_OWNER, { flag: "wx" });
+    return true;
+  } catch (error) {
+    if (/** @type {any} */ (error).code !== "EEXIST") throw error;
+  }
+  try {
+    if (lockIsStale(lock)) fs.unlinkSync(lock);
+  } catch {
+    // The owner released it between our two reads; try again.
+  }
+  return false;
+}
+
 /** One state writer at a time, so parallel agents calling the script can't lose each other's updates. */
 function withStateLock(fn) {
   const lock = path.join(root(), ".swarm", ".lock");
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   const deadline = Date.now() + 900_000;
-  for (;;) {
-    try {
-      fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
-      break;
-    } catch (error) {
-      if (/** @type {any} */ (error).code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > 1_800_000) {
-          fs.unlinkSync(lock);
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() > deadline) fail("another zerg command has held .swarm/.lock for 15 minutes");
-      sleep(200);
-    }
+  while (!takeLock(lock)) {
+    if (Date.now() > deadline) fail("another zerg command has held .swarm/.lock for 15 minutes");
+    sleep(200);
   }
   try {
     return fn();
   } finally {
-    fs.rmSync(lock, { force: true });
+    if (exists(lock) && read(lock).trim() === LOCK_OWNER) fs.rmSync(lock, { force: true });
   }
 }
 
@@ -398,6 +426,8 @@ function cmdConfig(key, value = "") {
 function cmdNew(goal) {
   const dir = goalDir(goal);
   if (exists(dir)) fail(`${goal} already exists`);
+  if (git(["rev-parse", "--verify", "--quiet", "HEAD"], { check: false }).code !== 0) fail("the repo has no commits; commit once, then run new");
+  if (!branch()) fail("HEAD is detached; check out the branch the swarm should build on, then run new");
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(holdoutDir(goal), { recursive: true });
   const contract = read(path.join(TEMPLATES, "contract.md")).replaceAll("<goal>", goal);
@@ -429,23 +459,29 @@ function cmdLint(goal) {
   if (problems.length) exit(1);
 }
 
-function cmdApprove(goal, autonomy = "ask") {
-  if (!["ask", "auto"].includes(autonomy)) fail("autonomy is ask or auto");
-  const text = contractText(goal);
-  const header = parseHeader(text);
+/** Everything approve needs before it touches a branch. Resuming means a crash left us on swarm/<goal>. */
+function approveChecks(goal, header, resuming) {
   const problems = allPlanProblems(goal);
   if (problems.length) fail("plan fails lint:\n" + problems.join("\n"));
-  if (branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
+  if (!resuming && branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
+  if (!resuming && git(["rev-parse", "--verify", "--quiet", `swarm/${goal}`], { check: false }).code === 0) {
+    fail(`swarm/${goal} already exists; check it out to finish approving, or delete it to start over`);
+  }
   const foreign = dirtyPaths().filter((p) => !p.startsWith(`.swarm/${goal}/`) && !p.startsWith(".gitignore"));
   if (foreign.length) fail("tree not clean: " + foreign.join(", "));
   const [ok, output] = run(header.test, root());
   if (!ok) fail("the suite is red on base, so the swarm can't tell its breakage from what's already broken:\n" + output);
-  git(["checkout", "-q", "-b", `swarm/${goal}`]);
+}
+
+function cmdApprove(goal, autonomy = "ask") {
+  if (!["ask", "auto"].includes(autonomy)) fail("autonomy is ask or auto");
+  const text = contractText(goal);
+  const resuming = branch() === `swarm/${goal}`;
+  approveChecks(goal, parseHeader(text), resuming);
+  if (!resuming) git(["checkout", "-q", "-b", `swarm/${goal}`]);
   git(["add", "--", ".gitignore"]);
-  if (git(["diff", "--cached", "--quiet"], { check: false }).code !== 0) {
-    // Infrastructure, owned by zerg rather than a unit; the whole review skips this commit.
-    git(["commit", "-q", "-m", `swarm ${goal}: infrastructure: ignore swarm state`]);
-  }
+  // Infrastructure, owned by zerg rather than a unit; the whole review skips this commit.
+  if (git(["diff", "--cached", "--quiet"], { check: false }).code !== 0) commitState(`swarm ${goal}: infrastructure: ignore swarm state`);
   write(path.join(goalDir(goal), "contract.md"), setHeader(text, "autonomy", autonomy));
   log(goal, goal, "approved", `autonomy ${autonomy}`);
   save(goal, "approved plan");
@@ -537,12 +573,20 @@ function cmdBaseline(goal) {
 
 // --- the unit loop ---
 
+/** Each leased unit, whether its worktree still exists, and how long ago it was leased. */
+function leases(goal, units, rows) {
+  return units.filter((u) => u.state === "leased").map((u) => {
+    const at = rows.filter((e) => e.subject === u.unit && e.event === "leased").pop()?.ts;
+    return { unit: u.unit, worktree: exists(worktreePath(goal, u.unit)), minutes: at ? (Date.now() - Date.parse(at)) / 60_000 : Infinity };
+  });
+}
+
 function currentRow(goal) {
   const text = contractText(goal);
   const units = loadUnits(goal);
   const rows = entries(goal);
   const header = parseHeader(text);
-  const proven = new Set(rows.filter((e) => e.event === "proof").map((e) => e.subject));
+  const proven = new Set(rows.filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
   const now = fingerprint(units, rows);
   const state = {
     stop: stopped(), bound: boundHit(rows, { budget: budget(goal), bounds: userBounds(), current: now, unitCount: units.length }), has_contract: true,
@@ -551,7 +595,8 @@ function currentRow(goal) {
     unproven: criteria(text).filter((c) => !proven.has(c)),
     open_findings: openFindings(rows),
     phases: Object.fromEntries(units.filter((u) => u.state === "produced").map((u) => [u.unit, unitPhase(rows, u.unit)])),
-    fix_exists: units.some((u) => u.unit.startsWith("F-")),
+    fix_exists: rows.some((e) => e.event === "auto-fix"),
+    orphans: orphanedLeases(leases(goal, units, rows), userBounds().lease_minutes),
   };
   return { row: derive(state), now };
 }
@@ -640,7 +685,7 @@ function restoreAfterVerifier(goal) {
   const leftover = dirty.filter((p) => !tracked.includes(p));
   log(goal, goal, "verifier-wrote", dirty.join(", "));
   git(["add", "--", path.join(".swarm", goal, "log.md")]);
-  git(["commit", "-q", "-m", `swarm ${goal}: restore after a verifier write`]);
+  commitState(`swarm ${goal}: restore after a verifier write`);
   fail(`a verifier changed the tree (${dirty.join(", ")}); tracked files restored` +
     (leftover.length ? `; remove these untracked files by hand: ${leftover.join(", ")}` : "") + ". Rerun that verifier once.");
 }
@@ -714,7 +759,10 @@ function cmdMerge(goal, uid) {
   }
   restoreAfterVerifier(goal);
   save(goal, "before merge");
-  if (git(["merge", "-q", "--no-ff", "--no-edit", `unit/${goal}/${uid}`], { check: false }).code !== 0) {
+  const before = out(["rev-parse", "HEAD"]);
+  // A crash between the merge commit and the state save leaves the unit merged already; don't merge it twice.
+  const merged = git(["merge-base", "--is-ancestor", `unit/${goal}/${uid}`, "HEAD"], { check: false }).code === 0;
+  if (!merged && git(["merge", "-q", "--no-ff", "--no-edit", `unit/${goal}/${uid}`], { check: false }).code !== 0) {
     git(["merge", "--abort"], { check: false });
     moveUnit(goal, uid, "stuck", "merge conflict: the plan's scopes collide in practice");
     exit(1);
@@ -723,21 +771,32 @@ function cmdMerge(goal, uid) {
   // Per merge: this unit's check and every merged unit's check must pass.
   const guarded = loadUnits(goal).filter((u) => u.state === "merged" || u.unit === uid);
   const broken = guarded.filter((u) => !run(u.check, root())[0]).map((u) => u.unit);
+  if (broken.length && merged) {
+    moveUnit(goal, uid, "stuck", `merged before a crash, and now these checks fail: ${broken.join(", ")}`);
+    exit(1);
+  }
   if (broken.length) {
-    git(["reset", "-q", "--hard", "HEAD~1"]);
+    git(["reset", "-q", "--hard", before]);
     revise(goal, uid, `after merge these checks fail: ${broken.join(", ")}`);
     exit(1);
   }
   moveUnit(goal, uid, "merged", "checks green");
 }
 
-function cmdAnswer(goal, subject, ...words) {
-  const text = words.join(" ");
+/** Records a human decision under the contract's Decisions section. */
+function addDecision(goal, subject, text) {
   const contract = path.join(goalDir(goal), "contract.md");
   write(contract, read(contract).trimEnd() + `\n- ${subject}: ${clean(text)}\n`);
+}
+
+function cmdAnswer(goal, subject, ...words) {
+  const text = words.join(" ");
   if (subject !== "goal") {
     const unit = getUnit(loadUnits(goal), subject);
-    if (unit.state !== "stuck") fail(`${subject} is ${unit.state}, not stuck`);
+    if (unit.state !== "stuck") fail(`${subject} is ${unit.state}, not stuck; a blocked unit is answered through the unit blocking it`);
+  }
+  addDecision(goal, subject, text);
+  if (subject !== "goal") {
     updateUnit(goal, subject, { event: "answered", note: text, fields: { state: "planned", revisions: "0", note: `answered: ${text}` } });
   } else log(goal, goal, "answered", text);
   save(goal, `decision for ${subject}`);
@@ -758,13 +817,12 @@ function cmdAmend(goal, uid, ...words) {
 function cmdRescope(goal, uid, scope, ...reason) {
   const units = loadUnits(goal);
   const unit = getUnit(units, uid);
-  if (unit.state !== "stuck") fail(`${uid} is ${unit.state}; only a stuck unit is rescoped, after a human decides`);
+  if (!["stuck", "planned"].includes(unit.state)) fail(`${uid} is ${unit.state}; only a stuck or planned unit is rescoped, after a human decides`);
   const clash = units.filter((u) => u.unit !== uid && !CLOSED.includes(u.state) && globsOverlap(splitList(scope), splitList(u.scope)))
     .map((u) => u.unit);
   if (clash.length) fail(`new scope overlaps open units: ${clash.join(", ")}`);
   const text = reason.join(" ") || "human decision";
-  const contract = path.join(goalDir(goal), "contract.md");
-  write(contract, read(contract).trimEnd() + `\n- ${uid}: scope is now ${clean(scope)}: ${clean(text)}\n`);
+  addDecision(goal, uid, `scope is now ${scope}: ${text}`);
   updateUnit(goal, uid, { event: "rescoped", note: `${scope}: ${text}`, fields: { scope, state: "planned", revisions: "0", note: `rescoped: ${text}` } });
   save(goal, `rescope ${uid}`);
   say(`${uid}: scope ${scope}; back to planned`);
@@ -772,18 +830,53 @@ function cmdRescope(goal, uid, scope, ...reason) {
 
 // --- integrate to hand-off ---
 
-function cmdAddFix(goal, task, scope) {
-  require(goal, "integrated");
+/** Adds a fix unit F-n, which reopens integration: it runs through implement, check, review, and integrate again. */
+function addFixUnit(goal, task, scope, event) {
+  if (!splitList(scope).length) fail("a fix unit needs a scope");
   const units = loadUnits(goal);
-  if (units.some((u) => u.unit.startsWith("F-"))) fail("one fix unit per goal; a second blocking finding goes to the human");
+  const open = units.filter((u) => !CLOSED.includes(u.state)).map((u) => u.unit);
+  if (open.length) fail(`units still open: ${open.join(", ")}; a fix unit comes after them`);
+  const id = `F-${units.filter((u) => u.unit.startsWith("F-")).length + 1}`;
   /** @type {Unit} */
-  const fix = { unit: "F-1", task, scope, after: "-", criteria: "-", check: parseHeader(contractText(goal)).test,
+  const fix = { unit: id, task, scope, after: "-", criteria: "-", check: parseHeader(contractText(goal)).test,
     state: "planned", revisions: "0", note: "" };
   saveUnits(goal, [...units, fix]);
-  log(goal, "F-1", "added", task);
-  log(goal, goal, "reopened", "fix unit F-1");
-  save(goal, "fix unit F-1");
-  say("added F-1; it runs through implement, check, review, then integrate again");
+  log(goal, id, event, task);
+  log(goal, goal, "reopened", `fix unit ${id}`);
+  save(goal, `fix unit ${id}`);
+  say(`added ${id}; it runs through implement, check, review, then integrate again`);
+  return id;
+}
+
+/** The orchestrator's one automatic fix for a blocking whole-review finding. */
+function cmdAddFix(goal, task, scope) {
+  require(goal, "whole-blocking");
+  if (entries(goal).some((e) => e.event === "auto-fix")) fail("add-fix runs once per goal; ask the human, who can `reopen`");
+  addFixUnit(goal, task, scope, "auto-fix");
+}
+
+/** A human decision: add a fix unit after a goal-level failure (integration, or a whole review that blocks again). */
+function cmdReopen(goal, task, scope, ...why) {
+  require(goal, "approved");
+  const reason = why.join(" ") || "human decision";
+  addDecision(goal, "goal", `reopened for "${task}" (${scope}): ${reason}`);
+  addFixUnit(goal, task, scope, "added");
+}
+
+/** A human decision: accept a criterion without proof, or accept the whole change despite a blocking finding. */
+function cmdWaive(goal, target, ...why) {
+  const reason = why.join(" ");
+  if (!reason) fail("waive needs a reason; it goes in the contract and the hand-off");
+  const text = contractText(goal);
+  if (target !== "whole" && !criteria(text).includes(target)) fail(`no criterion ${target}`);
+  require(goal, "integrated");
+  addDecision(goal, target, `waived: ${reason}`);
+  if (target === "whole") log(goal, goal, "whole-review", `waived: ${reason}`);
+  else log(goal, target, "waived", reason);
+  const settled = new Set(entries(goal).filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
+  if (target !== "whole" && criteria(text).every((c) => settled.has(c))) log(goal, goal, "proved");
+  save(goal, `waive ${target}`);
+  say(`${target}: waived`);
 }
 
 function cmdIntegrate(goal) {
@@ -813,8 +906,8 @@ function cmdProve(goal, criterion, ...command) {
   say(output);
   if (!ok) fail(`${criterion}: evidence command failed, so it is not proven`);
   log(goal, criterion, "proof", evidence);
-  const proven = new Set(entries(goal).filter((e) => e.event === "proof").map((e) => e.subject));
-  if (criteria(text).every((c) => proven.has(c))) log(goal, goal, "proved");
+  const settled = new Set(entries(goal).filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
+  if (criteria(text).every((c) => settled.has(c))) log(goal, goal, "proved");
   save(goal, `proof for ${criterion}`);
 }
 
@@ -895,7 +988,8 @@ function cmdHandoff(goal) {
   const text = contractText(goal);
   const rows = entries(goal);
   const base = parseHeader(text).base;
-  const proofs = Object.fromEntries(rows.filter((e) => e.event === "proof").map((e) => [e.subject, e.note]));
+  const proofs = Object.fromEntries(rows.filter((e) => ["proof", "waived"].includes(e.event))
+    .map((e) => [e.subject, e.event === "waived" ? `WAIVED: ${e.note}` : e.note]));
   say(`branch: swarm/${goal} (base ${base})\n`);
   say(out(["diff", "--stat", `${base}...swarm/${goal}`]) + "\n");
   say("criteria:\n" + criteria(text).map((c) => `  ${c}: ${proofs[c] ?? "UNPROVEN"}`).join("\n"));
@@ -928,7 +1022,7 @@ const COMMANDS = {
     }
     moveUnit(goal, uid, target, note.join(" "));
   },
-  answer: cmdAnswer, rescope: cmdRescope, amend: cmdAmend, "add-fix": cmdAddFix,
+  answer: cmdAnswer, rescope: cmdRescope, amend: cmdAmend, "add-fix": cmdAddFix, reopen: cmdReopen, waive: cmdWaive,
   integrate: cmdIntegrate, prove: cmdProve, stage: cmdStage, tokens: cmdTokens, status: cmdStatus, handoff: cmdHandoff,
 };
 

@@ -36,7 +36,8 @@ You're asked three things at most:
 - **Answer** a stuck unit.
 - **Merge** the branch.
 
-To stop new work at any time, run `touch .swarm/STOP`.
+To stop new work at any time, run `touch .swarm/STOP`. Don't edit files in the main tree during a run: the swarm owns it
+until the hand-off.
 
 ## What it does, in order
 
@@ -82,7 +83,12 @@ Each role records its own result through the script (`define`, `report`, `review
 - **Holdout stays hidden:** the holdout tests and their command live outside the repo, in `$ZERG_HOME/holdout/`, where
   no test runner collects them. Only the examiner's brief names the folder.
 - **Two strikes:** a third failure, or the same failure word for word, makes a unit stuck.
-- **Bounds:** no-progress, iteration, and token limits, plus `.swarm/STOP`.
+- **Bounds:** no-progress, iteration, lease, and token limits, plus `.swarm/STOP`.
+- **Recovery:** every question the swarm can ask has a command that acts on the answer: `answer`, `rescope`,
+  `reopen` (a fix unit after a goal-level failure), `waive` (accept a criterion or the whole change), and drop.
+- **Crash safety:** state writes are atomic, the lock knows its owner, `merge` rolls back to the sha it recorded and
+  recognizes a unit a crash already merged, and `approve` resumes on a half-made branch. State commits skip your
+  commit hooks and signing; worker commits keep them.
 - **Nothing merges into your base branch.**
 
 ## How it learns without an upgrade

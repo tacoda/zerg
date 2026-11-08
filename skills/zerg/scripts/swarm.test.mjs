@@ -298,3 +298,51 @@ describe("batch 1 guards", () => {
     for (const p of ["src/env.py", "keyboard.js", "docs/pem-format.md"]) assert.ok(!swarm.SECRET.test(p), p);
   });
 });
+
+describe("batch 2 recovery", () => {
+  test("a lease is orphaned only when its worktree is gone or it is too old", () => {
+    const leases = [
+      { unit: "U-1", worktree: true, minutes: 5 },
+      { unit: "U-2", worktree: false, minutes: 5 },
+      { unit: "U-3", worktree: true, minutes: 90 },
+    ];
+    assert.deepEqual(swarm.orphanedLeases(leases, 60), ["U-2", "U-3"]);
+  });
+
+  test("live leases make row 7 wait instead of orphaning them", () => {
+    const units = [unit("U-001", "a", { state: "leased" }), unit("U-002", "b", { after: "U-001" })];
+    assert.deepEqual(swarm.derive(state({ units, orphans: [] })).slice(0, 2), [7, "wait"]);
+    assert.deepEqual(swarm.derive(state({ units, orphans: ["U-001"] })).slice(0, 2), [7, "orphans"]);
+  });
+
+  test("row 9 says which units are stuck and which wait on them", () => {
+    const units = [unit("U-001", "a", { state: "stuck" }), unit("U-002", "b", { after: "U-001" }), unit("U-003", "c", { state: "merged" })];
+    assert.equal(swarm.derive(state({ units }))[2], "U-001 (stuck) U-002 (blocked by U-001)");
+  });
+
+  test("a failed integration is a goal-level question, even under auto", () => {
+    const units = [unit("U-001", "a", { state: "merged" })];
+    const events = new Set(["approved", "defined", "baseline", "integrate-failed"]);
+    for (const autonomy of ["ask", "auto"]) {
+      const [row, action, detail] = swarm.derive(state({ units, events, autonomy }));
+      assert.deepEqual([row, action], [9, "interrupt"]);
+      assert.match(detail, /^goal: integration failed/);
+    }
+  });
+
+  test("reopen clears integration, its failure, and the whole review", () => {
+    const rows = ["integrated", "integrate-failed", "whole-review", "whole-blocking", "reopened"].map((event) => ({ event }));
+    const events = swarm.goalEvents(rows);
+    for (const gone of ["integrated", "integrate-failed", "whole-review", "whole-blocking"]) assert.ok(!events.has(gone), gone);
+  });
+
+  test("waive takes a criterion or whole", () => {
+    assert.equal(swarm.argProblem("waive", ["G-ok", "C2", "why"]), null);
+    assert.equal(swarm.argProblem("waive", ["G-ok", "whole", "why"]), null);
+    assert.match(swarm.argProblem("waive", ["G-ok", "U-001", "why"]), /criterion like C1/);
+  });
+
+  test("lease_minutes is a bound users can set", () => {
+    assert.equal(swarm.BOUNDS.lease_minutes, 60);
+  });
+});
