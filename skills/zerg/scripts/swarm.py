@@ -74,6 +74,8 @@ TRANSITIONS = {
 CLOSED = {"merged", "dropped"}
 # Defaults. A user's ~/.zerg/config (or $ZERG_HOME/config) overrides them without a plugin upgrade.
 BOUNDS = {"max_revisions": 2, "max_passes": 20, "no_progress": 3}
+# A clean unit still takes about 4 passes (implement, check, review, merge), so the cap grows with the plan.
+PASSES_PER_UNIT = 5
 
 
 # --- pure functions (covered by test_swarm.py) ---
@@ -294,10 +296,11 @@ def goal_events(entries):
     return events
 
 
-def bound_hit(entries, budget, bounds=BOUNDS, current=None):
+def bound_hit(entries, budget, bounds=BOUNDS, current=None, unit_count=0):
     passes = [e for e in entries if e["event"] == "pass"]
-    if len(passes) >= bounds["max_passes"]:
-        return f"iteration cap: {len(passes)} passes"
+    cap = bounds["max_passes"] + PASSES_PER_UNIT * unit_count
+    if len(passes) >= cap:
+        return f"iteration cap: {len(passes)} passes (cap {cap} for {unit_count} units)"
     window = bounds["no_progress"]
     recent = [p["note"] for p in passes]
     recent = (recent + [current])[-window:] if current is not None else recent[-window:]
@@ -812,7 +815,7 @@ def current_row(goal):
     proven = {e["subject"] for e in log_rows if e["event"] == "proof"}
     now = fingerprint(units, log_rows)
     state = {
-        "stop": stopped(), "bound": bound_hit(log_rows, budget(goal), user_bounds(), now), "has_contract": True,
+        "stop": stopped(), "bound": bound_hit(log_rows, budget(goal), user_bounds(), now, len(units)), "has_contract": True,
         "lint": lint_problems(text, units), "events": events, "units": units,
         "max_parallel": int(header.get("max_parallel") or 3), "autonomy": header.get("autonomy", "ask"),
         "unproven": [c for c in criteria(text) if c not in proven],

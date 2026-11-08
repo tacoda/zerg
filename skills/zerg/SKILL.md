@@ -119,5 +119,5 @@ The user layer (`S home`) lives outside this skill, so lessons survive every upd
 ## Bounds
 
 `S next` enforces these: 2 revisions per unit, a word-for-word repeat goes straight to stuck, 3 passes with no
-progress, 20 passes in total, an optional `token_budget`, and `.swarm/STOP`. The user's `S config` can change
+progress, 20 passes plus 5 per unit in total, an optional `token_budget`, and `.swarm/STOP`. The user's `S config` can change
 the first three.

@@ -216,6 +216,9 @@ class Bounds(unittest.TestCase):
     def test_iteration_cap(self):
         passes = [{"event": "pass", "note": str(i)} for i in range(swarm.BOUNDS["max_passes"])]
         self.assertIn("iteration cap", swarm.bound_hit(passes, 0))
+        self.assertIsNone(swarm.bound_hit(passes, 0, unit_count=5), "a clean 5-unit goal must fit")
+        more = passes + [{"event": "pass", "note": str(i)} for i in range(100, 125)]
+        self.assertIn("cap 45", swarm.bound_hit(more, 0, unit_count=5))
 
     def test_scope_violations(self):
         self.assertEqual(swarm.scope_violations(["src/a.py", "tests/t.py"], ["src/*.py"]), ["tests/t.py"])
