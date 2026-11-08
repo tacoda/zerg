@@ -1,0 +1,50 @@
+sequenceDiagram
+    autonumber
+    actor H as Human
+    participant O as Orchestrator<br/>(zerg skill)
+    participant F as swarm.py<br/>+ .swarm/goal + git
+    participant E as examiner role
+    participant W as worker role<br/>(worktree)
+    participant V as verifier role<br/>(read-only)
+
+    H->>O: use zerg on "goal in plain language"
+    O->>F: onboard: clean tree, base, run suite (green)
+    O->>F: write contract.md, plan.md
+    O->>H: INTERRUPT approve? (contract, questions, units)
+    H-->>O: approve (answers amend the contract)
+    O->>F: checkout -b swarm/goal, commit plan
+    O->>E: Goal, MAIN
+    E->>F: unit tests (committed) + holdout (gitignored)
+    E-->>O: check command per unit, holdout command
+    O->>F: baseline: every unit check fails
+
+    loop until every unit is merged or stuck
+        O->>F: lease ready units (after satisfied), commit
+        par one per ready unit
+            O->>W: Goal, Unit, MAIN
+            W->>F: read contract + own plan row (note, scope)
+            W->>F: branch unit/goal/U, edit scope, commit
+            W-->>O: RESULT produced | escalated | gave_up
+        end
+        O->>F: confirm commits exist (never trust the report)
+        O->>F: check: diff paths in scope, unit tests pass in temp worktree
+        par one per checked unit
+            O->>V: Goal, Unit, MAIN
+            V->>F: read diff, contract, trace untested inputs
+            V-->>O: VERDICT PASS | FAIL
+        end
+        O->>F: tree clean? merge PASS units, run suite
+        O->>F: revise failures: note, revisions+1 (stuck on 3rd or repeat)
+        opt stuck units
+            O->>H: INTERRUPT one question per stuck unit
+            H-->>O: answer / drop / stop
+        end
+    end
+
+    O->>F: integrate: suite + holdout (pass/fail only)
+    O->>V: Goal, whole, MAIN
+    V-->>O: blocking / advisory findings
+    O->>F: prove: every criterion mapped to evidence
+    O->>F: learn.md proposals, commit
+    O->>H: hand off: branch, diff stat, evidence, findings
+    H->>F: review and merge swarm/goal

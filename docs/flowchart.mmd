@@ -1,0 +1,43 @@
+flowchart TD
+    A([zerg skill: goal]) --> B[1 Onboard<br/>clean tree, base, green suite]
+    B --> C[2 Scope<br/>contract: criteria, constraints, questions]
+    C --> D[3 Plan<br/>units: scope, after, criteria]
+    D --> E{{4 Approve<br/>human, once}}
+    E -- revise --> C
+    E -- stop --> Z0([Stop])
+    E -- approve --> F[swarm/goal branch]
+    F --> G[[5 Define<br/>examiner writes tests + holdout, records with define]]
+    G --> H{6 Baseline<br/>every unit check fails?}
+    H -- a check passes --> G
+    H -- yes --> I[[7 Implement<br/>workers in parallel, worktrees made by lease, report results]]
+
+    I --> J{8 Check<br/>scope + unit tests}
+    J -- fail --> R[Revise<br/>note in plan.md]
+    J -- ok --> K[[9 Review<br/>verifier records pass or fail]]
+    K -- FAIL --> R
+    K -- PASS --> M{merge into swarm/goal<br/>merged checks green?}
+    M -- no --> R
+    M -- yes --> N[unit merged]
+    R --> S{3rd strike or<br/>same failure twice?}
+    S -- no --> I
+    S -- yes --> T{{Stuck<br/>human answers}}
+    T --> I
+    I -- escalated --> T
+
+    N --> O{all units merged?}
+    O -- no --> I
+    O -- yes --> P{10 Integrate<br/>suite + holdout}
+    P -- fail --> T
+    P -- pass --> Q[[11 Whole review<br/>cross-unit findings]]
+    Q -- blocking --> I
+    Q -- advisory --> U{12 Prove<br/>every criterion has evidence?}
+    U -- partial --> T
+    U -- yes --> V[13 Learn<br/>proposals in learn.md]
+    V --> W{{14 Hand off<br/>human merges swarm/goal}}
+
+    classDef human fill:#fde68a,stroke:#92400e,color:#1f2937
+    classDef agent fill:#bfdbfe,stroke:#1e3a8a,color:#1f2937
+    classDef gate fill:#e5e7eb,stroke:#374151,color:#1f2937
+    class E,T,W human
+    class G,I,K,Q agent
+    class H,J,M,S,O,P,U gate
