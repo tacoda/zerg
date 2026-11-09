@@ -7,4 +7,4 @@
 
 States: planned, leased, produced, merged, stuck, dropped.
 `scope` lists product files only, never tests. Scopes never overlap.
-`check` is filled at stage 5 with the command that runs this unit's tests.
+`check` is filled by the examiner's `define` with the command that runs this unit's tests.

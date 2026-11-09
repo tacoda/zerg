@@ -374,6 +374,43 @@ export function planProblems(units, crits) {
 }
 
 /** @param {string} text @param {Unit[]} units */
+/** Adds a decision line at the end of `## Decisions`, wherever that section sits; creates the section if it's missing. */
+export function insertDecision(text, line) {
+  const lines_ = text.trimEnd().split("\n");
+  const at = lines_.findIndex((l) => l.trim() === "## Decisions");
+  if (at < 0) return `${text.trimEnd()}\n\n## Decisions\n${line}\n`;
+  const next = lines_.findIndex((l, i) => i > at && l.startsWith("## "));
+  const end = next < 0 ? lines_.length : next;
+  let insertAt = end;
+  while (insertAt > at + 1 && !lines_[insertAt - 1].trim()) insertAt--;
+  lines_.splice(insertAt, 0, line);
+  return lines_.join("\n") + "\n";
+}
+
+/** Parts of the plan still holding the template's text: the title, a section's example prose, the example rows.
+ * @param {string} text the contract @param {string} template the contract template @param {Unit[]} units */
+export function templateProblems(text, template, units) {
+  const title = /<[^>]+>/.test(lines(text)[0] ?? "") ? ["contract: the title is still a placeholder"] : [];
+  const sections = SECTIONS.filter((name) => isTemplateSection(text, template, name))
+    .map((name) => `contract: ## ${name} still has the template's example text`);
+  const rows = units.filter(isTemplateRow).map((u) => `${u.unit}: still the template's example row`);
+  return [...title, ...sections, ...rows];
+}
+
+const isTemplateSection = (text, template, name) => {
+  const body = section(text, name).trim();
+  return Boolean(body) && body === section(template, name).trim();
+};
+
+const isTemplateRow = (u) => u.task === "one sentence" || /^path\/[ab]\.py$/.test(u.scope);
+
+/** Units whose tests passed before any work and haven't been strengthened since. The examiner's brief names them. */
+export function strengthenUnits(rows, units) {
+  if (rows.some((e) => e.event === "baseline")) return [];
+  const passed = new Set(rows.filter((e) => e.event === "baseline-pass").map((e) => e.subject));
+  return units.filter((u) => u.state === "planned" && passed.has(u.unit)).map((u) => u.unit);
+}
+
 /** max_parallel must be 1 or more and token_budget a whole number, when they're set at all. */
 const wholeNumberAtLeast = (value, min) => /^\d+$/.test(value) && parseInt(value, 10) >= min;
 

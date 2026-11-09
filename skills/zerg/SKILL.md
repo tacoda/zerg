@@ -13,9 +13,12 @@ metadata:
 You are the orchestrator. Find the absolute path of the directory that holds this file and call it `SKILL_DIR`.
 `S` means `node SKILL_DIR/scripts/swarm.mjs`. Run it from inside the target repo.
 
-The script holds every gate, bound, and state change. You run `S next`, do the one action it prints, and
-run `S next` again. You never write product code or tests, and you never edit `plan.md` or `log.md` by hand.
+The script holds every gate, bound, and state change. You run `S next <goal>`, do the one action it prints, and
+run it again. You never write product code or tests, and you never edit `plan.md` or `log.md` by hand.
 The roles do the work: the examiner writes tests, workers write code, and verifiers judge.
+
+**Starting and resuming.** For a new goal, start at Planning. To resume one, run `S next <goal>`. A goal's state
+lives on its branch, so if `S` says to check out `swarm/<goal>`, do that first, then run `S next <goal>` again.
 
 ## Iron laws
 
@@ -38,6 +41,10 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
   fresh start, and re-read the files instead of trusting what you remember. Be aware that one agent playing
   both worker and verifier is weaker review than two separate agents. Say so in the hand-off.
 
+If your agent tells you how many tokens a subagent used, record it as soon as the role returns:
+`S tokens <goal> <unit|examiner|whole> <stage> <n>`, where the stage is define, implement, review, or whole-review.
+That's what the hand-off's cost and the optional `token_budget` count. If your agent doesn't report usage, skip it.
+
 ## Rows
 
 `S next` prints `row N <action>: <detail>`.
@@ -49,7 +56,7 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 | 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
 | 4 | `define` | Run the examiner: `S brief <goal> examiner`. It records its checks with `S define`. |
 | 4 | `amend` | For each unit listed, run `S amend <goal> <unit> "<finding>"`, using the finding from `log.md`. If a finding needs a file outside the unit's scope, ask the human, who can `rescope` the unit. |
-| 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again with `Strengthen: <units>` added to its brief. |
+| 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again: `S brief <goal> examiner` now names them under `Strengthen:`. |
 | 6 | `check` | Run `S check <goal> <unit>` for each unit. Failures revise themselves. |
 | 6 | `review` | Run a verifier per unit: `S brief <goal> verifier <unit>`. It records its verdict with `S review`. |
 | 6 | `merge` | Run `S merge <goal> <unit>` for each unit. |
@@ -59,11 +66,12 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 | 9 | `interrupt` | For each unit marked `(stuck)`, read its `note` in `plan.md` and ask the human one question (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
 | 9 | `auto-drop` | For each listed unit: `S move <goal> <unit> dropped "auto: <note>"`. Goal-level questions are never auto-dropped; they always come as `interrupt`. |
 | 10 | `integrate` | Run `S integrate <goal>`. Report holdout as pass or fail only. A failure becomes a goal-level `interrupt` on the next pass. |
-| 11 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. It records the result with `S review <goal> whole`. Log each advisory finding with `S stage <goal> finding "<text>"`. |
+| 11 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. It records its advisory findings and its verdict itself. |
 | 11 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
 | 12 | `prove` | For each criterion listed, run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves a criterion, ask the human, who can `waive` it or `reopen` the goal. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
 | 14 | `handoff` | Run `S handoff <goal>` and print its report. Stop. |
+| 15 | `done` | The goal was handed off. Nothing is left to do. |
 
 ## Planning (row 2)
 
@@ -116,7 +124,7 @@ Apply nothing yourself.
 When the human asks to review zerg lessons:
 
 1. Run `S inbox`. If it's empty, say so and stop.
-2. For each proposal, read it in the inbox file that `S home` names. Then recommend one action:
+2. For each proposal, read it in the inbox file (`S home` prints its path). Then recommend one action:
    - **Accept it as a rule** with `S accept <id> "<note>"`. Accepted rules go to the user's `rules.md`, which every goal reads.
    - **Accept it as a bound change** with `S config <key> <n>`, then `S accept <id> "<note>"`.
    - **Dismiss it** with `S dismiss <id> "<reason>"`. Use this for a proposal that needs a new script gate, which only a release can add, or for a proposal about one project.

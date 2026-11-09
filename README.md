@@ -8,7 +8,7 @@ It works in any agent that can run shell commands. A dependency-free Node script
 so the rules are enforced by code. The skill's instructions cover only the judgment work: planning, writing
 tests, writing code, and reviewing it.
 
-![Flowchart](docs/flowchart.png)
+The full flow and who talks to whom are in [docs/workflow.md](docs/workflow.md).
 
 ## Install
 
@@ -32,32 +32,35 @@ Resume zerg goal G-csv-export.
 Review my zerg lessons.
 ```
 
-You're asked three things at most:
-- **Approve** the plan. At this point you can also choose `auto`, which drops stuck units instead of asking.
-- **Answer** a stuck unit.
-- **Merge** the branch.
+You're asked for three kinds of decision, and nothing else:
+- **Approve** the plan, once. You can also choose `auto` here, which drops stuck units instead of asking.
+- **Decide** when the swarm can't move on its own: a stuck unit (answer, rescope, or drop it), or a goal-level
+  failure (`reopen` with a fix unit, `waive` a criterion or the whole review, or stop). `auto` never decides these
+  goal-level questions for you.
+- **Merge** the branch at the end.
 
 To stop new work at any time, run `touch .swarm/STOP`. Don't edit files in the main tree during a run: the swarm owns it
 until the hand-off.
 
 ## What it does, in order
 
-| # | Stage | Who | Enforced by `swarm.mjs` |
+The row is the number `swarm.mjs next` prints when that step is due.
+
+| Row | Step | Who | Enforced by `swarm.mjs` |
 |---|---|---|---|
-| 1 | Onboard: clean tree, base branch, green suite | orchestrator | `approve` |
-| 2 | Scope: observable criteria, constraints, grep criteria with owners | orchestrator | `lint` |
-| 3 | Plan: units, non-overlapping scope, `after` dependencies | orchestrator | `lint` |
-| 4 | Approve, choosing `ask` or `auto` | you | `summary`, `approve` |
-| 5 | Define: unit tests (committed), holdout tests (hidden), findings | examiner | `define`, `amend` |
-| 6 | Baseline: every unit's tests fail first | orchestrator | `baseline` |
-| 7 | Implement: one unit per worktree, in parallel | worker | `lease`, `report` |
-| 8 | Check: diff in scope, unit tests pass | orchestrator | `check` |
-| 9 | Review, then merge into `swarm/<goal>` | verifier | `review`, `merge` |
+| 2 | Plan: observable criteria, constraints, units with non-overlapping scope and `after` | orchestrator | `new`, `lint` |
+| 3 | Approve, choosing `ask` or `auto`; the script checks for a clean tree and a green suite | you | `summary`, `approve` |
+| 4 | Define: unit tests (committed), holdout tests (hidden), findings routed into tasks | examiner | `define`, `amend` |
+| 5 | Baseline: every unit's tests fail first | orchestrator | `baseline` |
+| 8 | Implement: one unit per worktree, in parallel | worker | `lease`, `report` |
+| 6 | Check, review, then merge into `swarm/<goal>` | orchestrator, verifier | `check`, `review`, `merge` |
 | 10 | Integrate: full suite and holdout | orchestrator | `integrate` |
-| 11 | Whole review: cross-unit findings, one fix unit | verifier | `review whole`, `add-fix` |
-| 12 | Prove: every criterion has a passing evidence command | orchestrator | `prove` |
+| 11 | Whole review: cross-unit findings, one automatic fix unit | verifier | `review whole`, `add-fix` |
+| 12 | Prove: every criterion has a passing evidence command, or a waiver | orchestrator | `prove`, `waive` |
 | 13 | Learn: lessons split into two lanes and routed | orchestrator | `stage learned` |
-| 14 | Hand off with token cost; you merge | you | `handoff` |
+| 14 | Hand off with the evidence, findings, and token cost; you merge | you | `handoff` |
+
+Rows 0 and 1 are stops, 7 handles leases, and 9 is where the swarm asks you something.
 
 `swarm.mjs next` is the derive table: the agent runs it, does the one action it prints, and runs it again.
 
@@ -73,7 +76,7 @@ Each role records its own result through the script (`define`, `report`, `review
 
 ## What the code guarantees
 
-- **One writer at a time:** every state change takes `.swarm/.lock`, so parallel agents can't lose updates.
+- **One writer at a time:** every change to a goal's state takes `.swarm/.lock`, so parallel agents can't lose updates.
 - **Isolation:** every worker gets its own worktree and branch, outside the repo in `$ZERG_HOME/work/`, so your test
   runner never collects another worker's files. `lint` keeps their scopes from overlapping. An optional `setup:`
   command prepares each new worktree, for example `npm ci`.

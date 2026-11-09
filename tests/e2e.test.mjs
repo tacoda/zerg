@@ -57,6 +57,15 @@ step("next before a goal", "$S next G-1", /row 2 scope/);
 test("scope and plan", () => {
   sh("$S new G-1");
   edit(".swarm/G-1/contract.md", "<title>", "add sub and mul");
+  const file = path.join(T, ".swarm", "G-1", "contract.md");
+  const filled = { Outcome: "calc has sub, and a new mul module multiplies.", Why: "Callers need both.",
+    "Non-goals": "- No other operations.", Constraints: "- add keeps working, including for negatives.",
+    "Escalate when": "- A change needs a file outside its unit's scope." };
+  let text = fs.readFileSync(file, "utf8");
+  for (const [name, body] of Object.entries(filled)) {
+    text = text.replace(new RegExp(`(## ${name}\\n)[\\s\\S]*?(?=\\n## )`), `$1${body}\n`);
+  }
+  fs.writeFileSync(file, text);
   edit(".swarm/G-1/contract.md", "<command that runs the full suite>", "PYTHONPATH=src python3 -m unittest discover -s tests -q");
   edit(".swarm/G-1/contract.md", "- C1: an observable result a test or command can show", "- C1: sub(5, 3) returns 2\n- C2: mul(2, 3) returns 6");
   edit(".swarm/G-1/plan.md", "| U-001 | one sentence | path/a.py | - | C1 | | planned | 0 | |", "| U-001 | add sub | src/calc.py | - | C1 | | planned | 0 | |");
@@ -76,6 +85,14 @@ test("lint reads a contract saved with CRLF", () => {
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n"));
 });
 step("lint passes", "$S lint G-1", /plan ok/);
+test("lint catches what a planner left from the template", () => {
+  sh("$S new G-2");
+  const output = sh("$S lint G-2");
+  for (const expected of [/title is still a placeholder/, /## Outcome still has the template's example text/, /U-001: still the template's example row/]) {
+    assert.match(output, expected);
+  }
+  fs.rmSync(path.join(T, ".swarm", "G-2"), { recursive: true });
+});
 step("summary for approval", "$S summary G-1", /U-002 {2}add mul/);
 step("approve resumes on a half-made swarm branch", "git checkout -q -b swarm/G-1 && $S approve G-1 ask", /on swarm\/G-1/);
 step("infrastructure commit", "git log --oneline", /infrastructure: ignore swarm state/);

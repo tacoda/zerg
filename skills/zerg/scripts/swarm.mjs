@@ -27,7 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
-  blockers, orphanedLeases, stuckDetail, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
+  blockers, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -473,7 +473,8 @@ function runGrepCriteria(text, units) {
 function allPlanProblems(goal) {
   const text = contractText(goal);
   const units = loadUnits(goal);
-  return [...lintProblems(text, units), ...runGrepCriteria(text, units)];
+  const template = read(path.join(TEMPLATES, "contract.md"));
+  return [...lintProblems(text, units), ...templateProblems(text, template, units), ...runGrepCriteria(text, units)];
 }
 
 function cmdLint(goal) {
@@ -764,6 +765,8 @@ function cmdBrief(goal, role, uid = "-") {
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
   if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`);
   if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
+  const strengthen = role === "examiner" ? strengthenUnits(entries(goal), loadUnits(goal)) : [];
+  if (strengthen.length) text.push(`Strengthen: ${strengthen.join(", ")}`);
   say(text.join("\n"));
 }
 
@@ -816,7 +819,7 @@ function cmdMerge(goal, uid) {
 /** Records a human decision under the contract's Decisions section. */
 function addDecision(goal, subject, text) {
   const contract = path.join(goalDir(goal), "contract.md");
-  write(contract, read(contract).trimEnd() + `\n- ${subject}: ${clean(text)}\n`);
+  write(contract, insertDecision(read(contract), `- ${subject}: ${clean(text)}`));
 }
 
 function cmdAnswer(goal, subject, ...words) {
@@ -1026,7 +1029,8 @@ function cmdHandoff(goal) {
   const findings = rows.filter((e) => e.event === "finding").map((e) => `  ${e.note}`);
   say("findings:\n" + (findings.join("\n") || "  none"));
   say("units:\n" + loadUnits(goal).map((u) => `  ${u.unit}: ${u.state}, ${u.revisions} revisions`).join("\n"));
-  say("tokens:\n" + tokenLines(rows).join("\n"));
+  const recorded = rows.some((e) => e.event === "tokens");
+  say("tokens:\n" + (recorded ? tokenLines(rows).join("\n") : "  not recorded: the agent reported no token use for its roles"));
   say(`learn: .swarm/${goal}/learn.md`);
   say(`note: the merge also adds these .gitignore lines: ${IGNORES.join(", ")}`);
   log(goal, goal, "handed-off");

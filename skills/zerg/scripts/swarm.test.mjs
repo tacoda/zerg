@@ -381,3 +381,26 @@ describe("batch 3 real repos", () => {
     assert.equal(swarm.numberProblems({ token_budget: "lots" }).length, 1);
   });
 });
+
+describe("batch 4 docs made checkable", () => {
+  test("a decision lands under ## Decisions, even when sections follow it", () => {
+    const text = "# G\n\n## Decisions\n- a: one\n\n## Notes\nx\n";
+    assert.equal(swarm.insertDecision(text, "- b: two"), "# G\n\n## Decisions\n- a: one\n- b: two\n\n## Notes\nx\n");
+    assert.match(swarm.insertDecision("# G\n", "- b: two"), /## Decisions\n- b: two\n$/);
+  });
+
+  test("lint names what still holds the template's text", () => {
+    const template = "# <goal>: <title>\n\n## Outcome\nWhat is true when done.\n## Why\nThe reason.\n";
+    const text = "# G-1: <title>\n\n## Outcome\nWhat is true when done.\n## Why\nReal reason.\n";
+    const problems = swarm.templateProblems(text, template, [unit("U-001", "path/a.py")].map((u) => ({ ...u, task: "one sentence" })));
+    assert.deepEqual(problems, ["contract: the title is still a placeholder", "contract: ## Outcome still has the template's example text",
+      "U-001: still the template's example row"]);
+  });
+
+  test("the examiner's brief names the units to strengthen, from the log", () => {
+    const units = [unit("U-001", "a"), unit("U-002", "b"), unit("U-003", "c", { state: "stuck" })];
+    const rows = ["U-001", "U-003"].map((subject) => ({ subject, event: "baseline-pass", note: "" }));
+    assert.deepEqual(swarm.strengthenUnits(rows, units), ["U-001"]);
+    assert.deepEqual(swarm.strengthenUnits([...rows, { subject: "G", event: "baseline", note: "" }], units), []);
+  });
+});

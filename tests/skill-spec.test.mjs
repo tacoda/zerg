@@ -51,3 +51,20 @@ for (const name of skills) {
     }
   });
 }
+
+test("zerg: every row derive can print has a line in SKILL.md's Rows table", () => {
+  const core = fs.readFileSync(path.join(SKILLS, "zerg", "scripts", "core.mjs"), "utf8");
+  const printed = new Set([...core.matchAll(/return \[(\d+), (?:s\.autonomy === "auto" \? "auto-drop" : )?"([a-z-]+)"/g)]
+    .map(([, row, action]) => `${row} ${action}`));
+  // These come from a variable or a ternary, so the regex can't see them.
+  for (const row of ["9 auto-drop", "6 check", "6 review", "6 merge"]) printed.add(row);
+  const skill = fs.readFileSync(path.join(SKILLS, "zerg", "SKILL.md"), "utf8");
+  const documented = new Set();
+  for (const [, rows, actions] of skill.matchAll(/^\| ([\d, ]+) \| ((?:`[a-z-]+`(?:, )?)+) \|/gm)) {
+    for (const row of rows.split(",").map((r) => r.trim())) {
+      for (const [, action] of actions.matchAll(/`([a-z-]+)`/g)) documented.add(`${row} ${action}`);
+    }
+  }
+  const missing = [...printed].filter((r) => !documented.has(r));
+  assert.deepEqual(missing, [], `rows derive can print but SKILL.md doesn't explain: ${missing.join(", ")}`);
+});
