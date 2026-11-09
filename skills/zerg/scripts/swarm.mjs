@@ -117,9 +117,14 @@ function stamp(withTime = true) {
 const json = (value) => JSON.stringify(value, null, 2);
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/** Test suites can print a lot; spawnSync's 1 MiB default would kill them and read as a failure. */
+const BIG = { maxBuffer: 1 << 30 };
+/** zerg's own git work is bookkeeping: the user's hooks and commit signing are for their commits, not these. */
+const OWN_GIT = ["-c", `core.hooksPath=${os.devNull}`, "-c", "commit.gpgsign=false"];
+
 /** @param {string[]} args @param {{cwd?: string, check?: boolean}} [options] */
 function git(args, { cwd, check = true } = {}) {
-  const proc = spawnSync("git", args, { cwd: cwd ?? root(), encoding: "utf8" });
+  const proc = spawnSync("git", [...OWN_GIT, ...args], { cwd: cwd ?? root(), encoding: "utf8", ...BIG });
   if (check && proc.status !== 0) fail(`git ${args.join(" ")}: ${(proc.stderr ?? "").trim()}`);
   return { code: proc.status ?? 1, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "" };
 }
@@ -138,7 +143,7 @@ function root() {
 
 /** Runs a project command through the shell. @returns {[boolean, string]} */
 function run(command, cwd) {
-  const proc = spawnSync(command, { shell: true, cwd, encoding: "utf8", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+  const proc = spawnSync(command, { shell: true, cwd, encoding: "utf8", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" }, ...BIG });
   return [proc.status === 0, ((proc.stdout ?? "") + (proc.stderr ?? "")).slice(-3000)];
 }
 
@@ -211,7 +216,7 @@ function onSwarm(goal) {
 
 /** Commits zerg's own state. A user's hooks and commit signing are for their code, not for this bookkeeping. */
 function commitState(message) {
-  git(["-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", message]);
+  git(["commit", "-q", "--no-verify", "-m", message]);
 }
 
 function save(goal, message) {
@@ -284,10 +289,14 @@ function revise(goal, uid, note) {
 
 const LOCK_OWNER = `${process.pid}@${os.hostname()}`;
 
-/** True when no live process owns the lock: a dead pid on this host, or an old lock from another host. */
+/** True when no live process owns the lock: a dead pid on this host, an old lock from another host, or an empty
+ * lock that a process died before writing its name into. */
 function lockIsStale(lock) {
-  const [pid, host] = partition(read(lock).trim(), "@").filter((_, i) => i !== 1);
-  if (host !== os.hostname()) return Date.now() - fs.statSync(lock).mtimeMs > 1_800_000;
+  const owner = read(lock).trim();
+  const age = Date.now() - fs.statSync(lock).mtimeMs;
+  if (!owner.includes("@")) return age > 5_000;
+  const [pid, host] = partition(owner, "@").filter((_, i) => i !== 1);
+  if (host !== os.hostname()) return age > 1_800_000;
   try {
     process.kill(parseInt(pid, 10), 0);
     return false;
@@ -296,38 +305,66 @@ function lockIsStale(lock) {
   }
 }
 
+/** @returns {"taken" | "stale" | "busy"} "stale" means a dead owner's lock was cleared: a command crashed. */
 function takeLock(lock) {
   try {
     fs.writeFileSync(lock, LOCK_OWNER, { flag: "wx" });
-    return true;
+    return "taken";
   } catch (error) {
     if (/** @type {any} */ (error).code !== "EEXIST") throw error;
   }
   try {
-    if (lockIsStale(lock)) fs.unlinkSync(lock);
+    if (lockIsStale(lock)) {
+      fs.unlinkSync(lock);
+      return "stale";
+    }
   } catch {
     // The owner released it between our two reads; try again.
   }
-  return false;
+  return "busy";
 }
 
-/** One state writer at a time, so parallel agents calling the script can't lose each other's updates. */
-function withStateLock(fn) {
-  const lock = path.join(root(), ".swarm", ".lock");
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
+/** Waits for the lock. @returns {boolean} whether a crashed command left it behind. */
+function acquire(lock, label) {
   // ZERG_LOCK_TIMEOUT_S shortens the wait, which lets a test prove a live owner's lock is never taken.
   const seconds = parseInt(process.env.ZERG_LOCK_TIMEOUT_S ?? "", 10) || 900;
   const deadline = Date.now() + seconds * 1000;
-  while (!takeLock(lock)) {
-    if (Date.now() > deadline) fail(`another zerg command (${exists(lock) ? read(lock).trim() : "gone"}) held .swarm/.lock for ${seconds} seconds`);
-    sleep(200);
+  let crashed = false;
+  for (let got = takeLock(lock); got !== "taken"; got = takeLock(lock)) {
+    crashed ||= got === "stale";
+    if (Date.now() > deadline) fail(`another zerg command (${exists(lock) ? read(lock).trim() : "gone"}) held ${label} for ${seconds} seconds`);
+    if (got === "busy") sleep(200);
   }
+  return crashed;
+}
+
+/** One writer at a time, so parallel agents calling the script can't lose each other's updates. */
+function withLock(lock, label, fn) {
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  const crashed = acquire(lock, label);
   try {
-    return fn();
+    return fn(crashed);
   } finally {
     if (exists(lock) && read(lock).trim() === LOCK_OWNER) fs.rmSync(lock, { force: true });
   }
 }
+
+/** Holding the lock means no write is in flight, so a temp file now is a crashed write's leftover. */
+function removeStaleTemps(goal) {
+  const dir = goalDir(goal);
+  for (const name of exists(dir) ? fs.readdirSync(dir) : []) if (name.endsWith(".tmp")) rmrf(path.join(dir, name));
+}
+
+/** A crashed command may have written state it never committed. Commit it, so no later restore mistakes it for a role's write. */
+function withStateLock(goal, fn) {
+  return withLock(path.join(root(), ".swarm", ".lock"), ".swarm/.lock", (crashed) => {
+    removeStaleTemps(goal);
+    if (crashed) save(goal, "recover state after a crashed command");
+    return fn();
+  });
+}
+
+const withUserLock = (fn) => withLock(path.join(zergHome(), ".lock"), `${zergHome()}/.lock`, fn);
 
 const worktreePath = (goal, uid) => userDir("work", goal, uid);
 
@@ -347,7 +384,7 @@ function removeWorktreeFor(ref) {
 function runSetup(goal, dir) {
   const setup = parseHeader(contractText(goal)).setup;
   if (!setup) return [true, ""];
-  const proc = spawnSync(setup, { shell: true, cwd: dir, encoding: "utf8", env: { ...process.env, MAIN: root() } });
+  const proc = spawnSync(setup, { shell: true, cwd: dir, encoding: "utf8", env: { ...process.env, MAIN: root() }, ...BIG });
   return [proc.status === 0, ((proc.stdout ?? "") + (proc.stderr ?? "")).slice(-3000)];
 }
 
@@ -475,7 +512,7 @@ function runGrepCriteria(text, units) {
   return grepCriteria(text).flatMap(([cid, command]) => {
     const argv = grepArgv(command);
     if (!argv) return [`${cid}: a grep criterion must be one plain grep command, with no shell operators`];
-    const proc = spawnSync(argv[0], argv.slice(1), { cwd: root(), encoding: "utf8" });
+    const proc = spawnSync(argv[0], argv.slice(1), { cwd: root(), encoding: "utf8", ...BIG });
     return grepProblems(cid, grepHitFiles(proc.stdout ?? ""), units);
   });
 }
@@ -497,6 +534,9 @@ function cmdLint(goal) {
 /** A fresh approve starts on base, with no swarm/<goal> yet. Resuming means a crash left us on swarm/<goal>. */
 function branchChecks(goal, header) {
   if (branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
+  // git can't hold both a branch `unit` and a branch `unit/<goal>/U-001`.
+  const blocking = ["unit", "swarm", `unit/${goal}`].filter(branchExists);
+  if (blocking.length) fail(`branch ${blocking.join(", ")} blocks the branches zerg makes under that name; rename it`);
   if (branchExists(`swarm/${goal}`)) {
     fail(`swarm/${goal} already exists; check it out to finish approving, or delete it to start over`);
   }
@@ -786,12 +826,13 @@ function restoreAfterVerifier(goal) {
   const dirty = dirtyPaths();
   if (!dirty.length) return;
   const tracked = dirty.filter((p) => out(["ls-files", "--", p]));
-  if (tracked.length) git(["restore", "--staged", "--worktree", "--", ...tracked], { check: false });
+  // A stash, not a restore: if the change was a person's and not the verifier's, nothing is lost.
+  if (tracked.length) git(["stash", "push", "-q", "-m", `zerg ${goal}: tree changes found at review`, "--", ...tracked], { check: false });
   const leftover = dirty.filter((p) => !tracked.includes(p));
   log(goal, goal, "verifier-wrote", dirty.join(", "));
   git(["add", "--", path.join(".swarm", goal, "log.md")]);
   commitState(`swarm ${goal}: restore after a verifier write`);
-  fail(`a verifier changed the tree (${dirty.join(", ")}); tracked files restored` +
+  fail(`the tree changed during review (${dirty.join(", ")}); tracked changes saved in \`git stash list\`` +
     (leftover.length ? `; remove these untracked files by hand: ${leftover.join(", ")}` : "") + ". Rerun that verifier once.");
 }
 
@@ -805,11 +846,12 @@ function cmdReport(goal, uid, outcome, ...text) {
   if (outcome === "produced" && !commitsAhead(goal, uid)) {
     fail(`unit/${goal}/${uid} has no commits. Commit your work in the worktree, then report again; the worktree is kept`);
   }
-  removeWorktreeFor(`unit/${goal}/${uid}`);
-  rmrf(worktreePath(goal, uid));
+  // State first: a crash after this leaves a stray worktree, never a lost result.
   if (outcome === "produced") moveUnit(goal, uid, "produced", note);
   else if (outcome === "escalated") moveUnit(goal, uid, "stuck", `question: ${note}`);
   else revise(goal, uid, `gave up: ${note}`);
+  removeWorktreeFor(`unit/${goal}/${uid}`);
+  rmrf(worktreePath(goal, uid));
 }
 
 /** A verifier records its verdict. It may not have changed anything else in the tree. */
@@ -850,11 +892,14 @@ function proofLines(goal) {
 
 /** What a verifier reads. For the whole goal: everything after zerg's infrastructure commit, minus its own state. */
 function diffCommand(goal, uid) {
-  if (uid !== "whole") return `git diff swarm/${goal}...unit/${goal}/${uid}`;
+  if (uid !== "whole") return `git diff ${shq(`swarm/${goal}...unit/${goal}/${uid}`)}`;
   const base = parseHeader(contractText(goal)).base;
   const infra = lines(out(["log", "--format=%H", "--grep", `^swarm ${goal}: infrastructure:`, `${base}..swarm/${goal}`])).pop();
-  return `git diff ${infra ? `${infra} swarm/${goal}` : `${base}...swarm/${goal}`} -- . ':(exclude).swarm'`;
+  return `git diff ${infra ? `${infra} ${shq(`swarm/${goal}`)}` : shq(`${base}...swarm/${goal}`)} -- . ':(exclude).swarm'`;
 }
+
+/** Quotes a value for a POSIX shell. A branch name may hold `$()` or `;`. */
+const shq = (/** @type {string} */ value) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /** The whole handoff for a subagent: identifiers and a role file, never a summary of the run. */
 function cmdBrief(goal, role, uid = "-") {
@@ -884,6 +929,17 @@ function cmdSummary(goal) {
   say("\nLint: " + (problems.length ? problems.join("; ") : "ok"));
 }
 
+/** A conflict makes the unit stuck. Any other merge failure is git's to report, and the unit stays as it is. */
+function mergeUnit(goal, uid) {
+  const merge = git(["merge", "-q", "--no-ff", "--no-edit", "--no-verify", `unit/${goal}/${uid}`], { check: false });
+  if (merge.code === 0) return;
+  const conflict = git(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], { check: false }).code === 0;
+  git(["merge", "--abort"], { check: false });
+  if (!conflict) fail(`git merge failed, so nothing was merged:\n${merge.stderr.trim()}`);
+  moveUnit(goal, uid, "stuck", "merge conflict: the plan's scopes collide in practice");
+  exit(1);
+}
+
 function cmdMerge(goal, uid) {
   onSwarm(goal);
   const unit = getUnit(loadUnits(goal), uid);
@@ -895,11 +951,7 @@ function cmdMerge(goal, uid) {
   const before = out(["rev-parse", "HEAD"]);
   // A crash between the merge commit and the state save leaves the unit merged already; don't merge it twice.
   const merged = git(["merge-base", "--is-ancestor", `unit/${goal}/${uid}`, "HEAD"], { check: false }).code === 0;
-  if (!merged && git(["merge", "-q", "--no-ff", "--no-edit", `unit/${goal}/${uid}`], { check: false }).code !== 0) {
-    git(["merge", "--abort"], { check: false });
-    moveUnit(goal, uid, "stuck", "merge conflict: the plan's scopes collide in practice");
-    exit(1);
-  }
+  if (!merged) mergeUnit(goal, uid);
   // Other units' tests are still red by design (fail-first), so the full suite waits for integrate.
   // Per merge: this unit's check and every merged unit's check must pass.
   const guarded = loadUnits(goal).filter((u) => u.state === "merged" || u.unit === uid);
@@ -1088,7 +1140,7 @@ function routeLearnings(goal) {
     routed.push("project -> .swarm/LEARNINGS.md");
   }
   if (lanes.zerg) {
-    appendBlock(inboxPath(), `${slug(path.basename(root()))} ${when}`, lanes.zerg);
+    withUserLock(() => appendBlock(inboxPath(), `${slug(path.basename(root()))} ${when}`, lanes.zerg));
     routed.push(`zerg -> ${inboxPath()}`);
   }
   return routed;
@@ -1212,13 +1264,13 @@ const COMMANDS = {
 };
 
 function dispatch(command, args) {
-  if (command in USER_COMMANDS) return USER_COMMANDS[command](...args);
+  if (command in USER_COMMANDS) return withUserLock(() => USER_COMMANDS[command](...args));
   if (!(command in COMMANDS) || !args.length) fail(USAGE);
   const problem = argProblem(command, args);
   if (problem) fail(problem);
   // A worker calls `report` from its own worktree, which `report` deletes. Work from the main tree.
   process.chdir(root());
-  return LOCK_FREE.has(command) ? COMMANDS[command](...args) : withStateLock(() => COMMANDS[command](...args));
+  return LOCK_FREE.has(command) ? COMMANDS[command](...args) : withStateLock(args[0], () => COMMANDS[command](...args));
 }
 
 /** @param {string[]} argv */

@@ -87,7 +87,7 @@ sequenceDiagram
         O->>S: check each produced unit (scope, examiner tests, check)
         par one per checked unit
             O->>V: brief verifier
-            V->>S: review pass / fail (any write it made is restored)
+            V->>S: review pass / fail (any write it made goes to git stash)
         end
         O->>S: merge each passed unit (merged checks re-run)
         opt stuck units or a goal question

@@ -420,6 +420,7 @@ export function rowProblems(unit, ids, crits) {
   return [
     ...(UNIT_ID.test(uid) ? [] : [`${uid}: unit id must look like U-001`]),
     ...(scopeGlobs(unit.scope).length ? [] : [`${uid}: empty scope`]),
+    ...(/[{}]/.test(unit.scope) ? [`${uid}: scope can't use { } because commas split it; list each path`] : []),
     ...splitList(unit.after).filter((d) => !ids.includes(d)).map((d) => `${uid}: unknown after ${d}`),
     ...splitList(unit.criteria).filter((c) => !crits.includes(c)).map((c) => `${uid}: unknown criterion ${c}`),
   ];

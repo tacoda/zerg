@@ -85,7 +85,10 @@ Each role records its own result through the script (`define`, `report`, `review
   `move` can't skip a gate: by hand it only records a lost lease or a drop.
 - **Checked ids:** every goal and unit id is validated before it reaches a path, a branch name, or a delete.
 - **No shell in planning:** grep criteria run as argv, so `lint` and `summary` never execute contract text.
-- **Checks don't repair:** a verifier's edits are restored, state files included, and its verdict is refused.
+- **Checks don't repair:** any change in the tree at review, state files included, goes into `git stash` and the
+  verdict is refused. A stash, not a discard, so an edit of yours made by mistake mid-run is never lost.
+- **Crash recovery:** a command that dies mid-write leaves a stale lock; the next command commits what it wrote first.
+- **Your git setup stays yours:** zerg's own commits, merges, and worktrees skip your hooks and commit signing.
 - **Holdout stays hidden:** the holdout tests and their command live outside the repo, in `$ZERG_HOME/holdout/`, where
   no test runner collects them. Only the examiner's brief names the folder. This hides it from roles that follow
   their instructions; it doesn't stop one that searches your home folder, because every role runs as your user.

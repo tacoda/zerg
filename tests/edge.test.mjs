@@ -130,7 +130,7 @@ describe("the unit loop's failure paths", () => {
     S("check G-1 U-002");
     r.write("src/scratch.py", "x = 1\n");
     assert.match(S("review G-1 U-002 pass ok"), /remove these untracked files by hand: src\/scratch\.py/);
-    assert.match(S("review G-1 U-002 pass ok"), /verifier changed the tree/);
+    assert.match(S("review G-1 U-002 pass ok"), /the tree changed during review/);
     fs.rmSync(r.at("src/scratch.py"));
     assert.match(S("review G-1 U-002 pass ok"), /review pass/);
   });
@@ -249,6 +249,63 @@ describe("rows that wait don't count toward the bounds", () => {
     plannedGoal(r, { rows: TWO_UNITS });
     for (let i = 0; i < 4; i++) r.sh("$S next G-1");
     assert.match(r.sh("$S next G-1"), /row 3 approve/);
+  });
+});
+
+describe("the user's git setup doesn't break zerg's own git work", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  const S = (cmd) => r.sh(`$S ${cmd}`);
+  test("signing that fails and hooks that refuse leave lease, check, and merge working", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    S("approve G-1 ask");
+    definedGoal(r);
+    S("baseline G-1");
+    r.sh("git config commit.gpgsign true && git config gpg.program false");
+    for (const hook of ["post-checkout", "commit-msg", "pre-merge-commit", "pre-commit"]) {
+      fs.writeFileSync(r.at(`.git/hooks/${hook}`), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    }
+    assert.match(S("lease G-1 U-002"), /leased U-002/);
+    r.sh(`cd "${r.tree("G-1", "U-002")}" && printf 'def mul(a, b):\\n    return a * b\\n' > src/mul.py && ` +
+      "git add -- src/mul.py && git -c commit.gpgsign=false commit --no-verify -qm U-002");
+    S("report G-1 U-002 produced mul && $S check G-1 U-002 && $S review G-1 U-002 pass ok");
+    assert.match(S("merge G-1 U-002"), /U-002: produced -> merged/);
+  });
+});
+
+describe("crash recovery", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("state a crashed command wrote but never committed is committed before the next command", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    r.sh("$S approve G-1 ask");
+    fs.appendFileSync(r.at(".swarm/G-1/log.md"), "- 2026-11-09T10:00:00 | U-001 | leased | \n");
+    r.write(".swarm/G-1/plan.md.4242.tmp", "half a file");
+    r.write(".swarm/.lock", `999999@${os.hostname()}`);
+    assert.equal(r.sh("$S tokens G-1 W-1 implement 1"), "");
+    assert.equal(r.sh("git status --porcelain").trim(), "");
+    assert.ok(!fs.existsSync(r.at(".swarm/G-1/plan.md.4242.tmp")), "the half-written temp file is gone");
+    assert.match(r.sh("git log --format=%s -3"), /recover state after a crashed command/);
+    assert.match(r.sh("git show HEAD~1:.swarm/G-1/log.md"), /\| U-001 \| leased \|/);
+  });
+  test("an empty lock file is cleared once it's a few seconds old", () => {
+    const lock = r.at(".swarm/.lock");
+    fs.writeFileSync(lock, "");
+    const old = new Date(Date.now() - 10_000);
+    fs.utimesSync(lock, old, old);
+    assert.equal(r.sh("$S tokens G-1 W-2 implement 1", { ZERG_LOCK_TIMEOUT_S: "2" }), "");
+  });
+});
+
+describe("inputs zerg can't use are refused before approval", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("a suite that prints more than 1 MiB still counts as green", () => {
+    plannedGoal(r, { rows: TWO_UNITS, header: "test: python3 -c \"print('x' * 1100000)\"" });
+    r.sh("git branch unit");
+    assert.match(r.sh("$S approve G-1 ask"), /branch unit blocks the branches zerg makes/);
+    r.sh("git branch -q -D unit");
+    assert.match(r.sh("$S approve G-1 ask"), /on swarm\/G-1/);
   });
 });
 

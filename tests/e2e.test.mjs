@@ -161,10 +161,10 @@ step("rescope works on a planned unit", "$S rescope G-1 U-002 src/mul.py 'examin
 step("brief names the role file", "$S brief G-1 worker U-001", /references\/worker\.md/);
 step("brief quotes the script path", "$S brief G-1 worker U-001", /S: node ".*swarm\.mjs"/);
 step("a verifier's brief has its own temp folder", "$S brief G-1 verifier U-001", /TMP: .*\/work\/.*\/G-1\/verify-/);
-step("a unit verifier's brief names its diff", "$S brief G-1 verifier U-001", /DIFF: git diff swarm\/G-1\.\.\.unit\/G-1\/U-001/);
+step("a unit verifier's brief names its diff", "$S brief G-1 verifier U-001", /DIFF: git diff 'swarm\/G-1\.\.\.unit\/G-1\/U-001'/);
 test("the whole verifier's diff starts after the infrastructure commit and leaves out .swarm", () => {
   const infra = sh("git log --format=%H --grep 'infrastructure:' -1").trim();
-  assert.match(sh("$S brief G-1 verifier whole"), new RegExp(`DIFF: git diff ${infra} swarm/G-1 -- \\. ':\\(exclude\\)\\.swarm'`));
+  assert.match(sh("$S brief G-1 verifier whole"), new RegExp(`DIFF: git diff ${infra} 'swarm/G-1' -- \\. ':\\(exclude\\)\\.swarm'`));
 });
 
 test("a path-traversal unit id is refused and nothing is deleted", () => {
@@ -186,10 +186,11 @@ test("worktree removed after report", () => assert.ok(!fs.existsSync(tree("U-001
 step("next says check", "$S next G-1", /row 6 check: U-001/);
 step("check passes", "$S check G-1 U-001", /"ok": true/);
 step("merge refused before review", "$S merge G-1 U-001", /passed by a verifier/);
-step("a verifier write is restored", "echo '# scribble' >> src/calc.py && $S review G-1 U-001 pass looks right", /verifier changed the tree/);
+step("a verifier write is set aside", "echo '# scribble' >> src/calc.py && $S review G-1 U-001 pass looks right", /the tree changed during review/);
 step("tree clean again", "git status --porcelain -- src | wc -l", /^\s*0$/m);
+step("the change is kept in a stash, not lost", "git stash show -p stash@{0}", /\+# scribble/);
 step("a verifier edit to state files is caught too", "echo forged >> .swarm/G-1/log.md && $S review G-1 U-001 pass looks right",
-  /verifier changed the tree \(\.swarm\/G-1\/log\.md\)/);
+  /the tree changed during review \(\.swarm\/G-1\/log\.md\)/);
 step("the forged line is gone and the restore is committed", "grep -c forged .swarm/G-1/log.md; git status --porcelain | wc -l", /^0\n\s*0$/m);
 step("review pass", "$S review G-1 U-001 pass looks right", /review pass/);
 step("next says merge", "$S next G-1", /row 6 merge: U-001/);

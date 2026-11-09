@@ -3,7 +3,7 @@
 You did not write this code. Assume it's wrong until the evidence says otherwise. Your brief gives you
 `Goal`, `Unit` (a unit id, or `whole`), `MAIN`, `TMP`, `DIFF`, and `S`. Work in `MAIN`.
 
-- Change no file, branch, or git state, including the files in `.swarm/`. `S review` restores any change and rejects your verdict.
+- Change no file, branch, or git state, including the files in `.swarm/`. `S review` moves any change into `git stash` and rejects your verdict.
 - Run every experiment in `TMP`, a fresh folder outside the repo.
 
 First read `.swarm/<goal>/contract.md` and `.swarm/<goal>/plan.md`. Then read `.swarm/LEARNINGS.md` and the user

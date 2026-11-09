@@ -509,3 +509,7 @@ test("a passing integration clears an earlier failure", () => {
   const events = swarm.goalEvents([{ event: "integrate-failed" }, { event: "integrated" }]);
   assert.ok(events.has("integrated") && !events.has("integrate-failed"));
 });
+
+test("a brace glob in a scope is a lint problem, because commas split the scope", () => {
+  assert.match(swarm.planProblems([unit("U-001", "src/{a,b}.py")], ["C1"]).join("\n"), /scope can't use \{ \}/);
+});
