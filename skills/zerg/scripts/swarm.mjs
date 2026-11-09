@@ -18,7 +18,7 @@ import {
   ARG_KINDS, ARG_SHAPES, BOUNDS, CLOSED, COLUMNS, GOAL_ID,
   IGNORES, MANUAL_MOVES, NOT_TREE, PASSES_PER_UNIT, ROLES, SECRET,
   SECTIONS, SHELL_META, TRANSITIONS, UNIT_ID, WILD, argProblem,
-  blockedUnits, boundHit, charClass, checkTransition, clean, criteria,
+  blockedUnits, boundHit, charClass, checkTransition, clean, criteria, oneLine, parseLogLine,
   derive, deriveClose, deriveGates, derivePrep, deriveUnits, endWord,
   escapeRe, fingerprint, fnmatch, globOverlap, globToken, globsOverlap,
   goalEvents, grepArgv, grepCriteria, grepHitFiles, grepProblems, idsIn,
@@ -189,13 +189,11 @@ const putUnit = (units, next) => units.map((u) => (u.unit === next.unit ? next :
 function entries(goal) {
   const file = path.join(goalDir(goal), "log.md");
   if (!exists(file)) return [];
-  return lines(read(file)).map((line) => line.replace(/^[- ]+/, "").split("|").map((p) => p.trim()))
-    .filter((parts) => parts.length >= 4)
-    .map((parts) => ({ ts: parts[0], subject: parts[1], event: parts[2], note: parts.slice(3).join(" | ") }));
+  return lines(read(file)).map(parseLogLine).filter((e) => e !== null);
 }
 
 function log(goal, subject, event, note = "") {
-  fs.appendFileSync(path.join(goalDir(goal), "log.md"), `- ${stamp()} | ${subject} | ${event} | ${clean(note)}\n`);
+  fs.appendFileSync(path.join(goalDir(goal), "log.md"), `- ${stamp()} | ${subject} | ${event} | ${oneLine(note)}\n`);
 }
 
 const branch = () => out(["branch", "--show-current"]);

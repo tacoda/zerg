@@ -420,3 +420,13 @@ describe("batch 5 rows and headers", () => {
     assert.deepEqual(swarm.duplicateHeaders(CONTRACT), []);
   });
 });
+
+test("a log note keeps `|` verbatim, and a table cell can't", () => {
+  const command = 'git archive HEAD | tar -x -C "$d" && npm test';
+  assert.deepEqual(swarm.parseLogLine(`- 2026-11-08T20:59:23 | C5 | proof | ${swarm.oneLine(command)}`),
+    { ts: "2026-11-08T20:59:23", subject: "C5", event: "proof", note: command });
+  assert.deepEqual(swarm.parseLogLine("- 2026-11-08T20:50:12 | G-1 | created | "),
+    { ts: "2026-11-08T20:50:12", subject: "G-1", event: "created", note: "" });
+  assert.equal(swarm.parseLogLine("# log"), null);
+  assert.equal(swarm.clean("a | b"), "a / b");
+});

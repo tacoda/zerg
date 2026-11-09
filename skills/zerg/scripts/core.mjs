@@ -81,7 +81,19 @@ export function charClass(pattern, i) {
 }
 
 /** @param {unknown} value */
-export const clean = (value) => String(value).replace(/\|/g, "/").split(/\s+/).filter(Boolean).join(" ");
+export const oneLine = (value) => String(value).split(/\s+/).filter(Boolean).join(" ");
+
+/** A table cell can't hold `|`, so it becomes `/`. */
+export const clean = (value) => oneLine(String(value).replace(/\|/g, "/"));
+
+/**
+ * A log line is `- ts | subject | event | note`. The note is last, so it keeps any `|` verbatim.
+ * @param {string} line
+ */
+export function parseLogLine(line) {
+  const m = /^-\s+(.*?) \| (.*?) \| (.*?) \|\s?(.*)$/.exec(line);
+  return m ? { ts: m[1], subject: m[2], event: m[3], note: m[4].trim() } : null;
+}
 
 /** @param {string} cell */
 export const splitList = (cell) => cell.split(",").map((s) => s.trim()).filter((s) => s !== "" && s !== "-");
