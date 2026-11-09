@@ -87,7 +87,8 @@ Each role records its own result through the script (`define`, `report`, `review
 - **No shell in planning:** grep criteria run as argv, so `lint` and `summary` never execute contract text.
 - **Checks don't repair:** a verifier's edits are restored, state files included, and its verdict is refused.
 - **Holdout stays hidden:** the holdout tests and their command live outside the repo, in `$ZERG_HOME/holdout/`, where
-  no test runner collects them. Only the examiner's brief names the folder.
+  no test runner collects them. Only the examiner's brief names the folder. This hides it from roles that follow
+  their instructions; it doesn't stop one that searches your home folder, because every role runs as your user.
 - **Two strikes:** a third failure, or the same failure word for word, makes a unit stuck.
 - **Bounds:** no-progress, iteration, lease, and token limits, plus `.swarm/STOP`.
 - **Recovery:** every question the swarm can ask has a command that acts on the answer: `answer`, `rescope`,

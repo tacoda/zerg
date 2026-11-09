@@ -318,6 +318,8 @@ describe("batch 2 recovery", () => {
   test("row 9 says which units are stuck and which wait on them", () => {
     const units = [unit("U-001", "a", { state: "stuck" }), unit("U-002", "b", { after: "U-001" }), unit("U-003", "c", { state: "merged" })];
     assert.equal(swarm.derive(state({ units }))[2], "U-001 (stuck) U-002 (blocked by U-001)");
+    units[0].note = "question: which sign?";
+    assert.equal(swarm.stuckDetail(units), "U-001 (stuck: question: which sign?) U-002 (blocked by U-001)");
   });
 
   test("a failed integration is a goal-level question, even under auto", () => {
@@ -429,4 +431,13 @@ test("a log note keeps `|` verbatim, and a table cell can't", () => {
     { ts: "2026-11-08T20:50:12", subject: "G-1", event: "created", note: "" });
   assert.equal(swarm.parseLogLine("# log"), null);
   assert.equal(swarm.clean("a | b"), "a / b");
+});
+
+test("a criterion's command comes from the contract: negated greps, or a body that is one command", () => {
+  const text = "## Criteria\n- C1: `grep -rn a src` and `grep -rn b lib`\n- C2: `npm ci && npm test`\n" +
+    "- C3: `fmt(-1)` returns `(1)`\n- C4: totals add up\n\n## Escalate when\n";
+  assert.equal(swarm.criterionCommand(text, "C1"), "! grep -rn a src && ! grep -rn b lib");
+  assert.equal(swarm.criterionCommand(text, "C2"), "npm ci && npm test");
+  assert.equal(swarm.criterionCommand(text, "C3"), "");
+  assert.equal(swarm.criterionCommand(text, "C4"), "");
 });

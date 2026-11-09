@@ -91,17 +91,12 @@ describe("the unit loop's failure paths", () => {
     assert.match(S("next G-1"), /row 0 stop/);
     fs.rmSync(r.at(".swarm/STOP"));
   });
-  test("produced with no commits revises the unit", () => {
-    S("lease G-1 U-001");
-    assert.match(S("produced G-1 U-001 done"), /has no commits/);
-    assert.match(r.read(".swarm/G-1/plan.md"), /\| U-001 \|.*\| planned \| 1 \|/);
-  });
   test("a failing check revises the unit", () => {
     S("lease G-1 U-001");
     r.work("G-1", "U-001", "printf '\\ndef sub(a, b):\\n    return a + b\\n' >> src/calc.py");
     S("report G-1 U-001 produced wrong");
     assert.match(S("check G-1 U-001"), /"check": "fail"/);
-    assert.match(r.read(".swarm/G-1/plan.md"), /\| U-001 \|.*\| planned \| 2 \|/);
+    assert.match(r.read(".swarm/G-1/plan.md"), /\| U-001 \|.*\| planned \| 1 \|/);
   });
   test("an untracked file a verifier leaves is named, and blocks its verdict", () => {
     S("lease G-1 U-002");
@@ -139,6 +134,21 @@ describe("the unit loop's failure paths", () => {
     assert.match(S("merge G-1 U-002"), /produced -> stuck/);
     assert.equal(r.sh("git status --porcelain --untracked-files=no").trim(), "");
     assert.ok(!fs.existsSync(r.at(".git/MERGE_HEAD")), "the merge was aborted");
+  });
+});
+
+describe("auto mode drops stuck units without the orchestrator", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("a unit that escalates under auto is dropped by next, with the unit it blocks", () => {
+    plannedGoal(r, { rows: [TWO_UNITS[0], TWO_UNITS[1].replace("| src/mul.py | - |", "| src/mul.py | U-001 |")] });
+    r.sh("$S approve G-1 auto");
+    definedGoal(r);
+    r.sh("$S baseline G-1 && $S lease G-1 U-001 && $S report G-1 U-001 escalated 'which sign?'");
+    assert.match(r.sh("$S peek G-1"), /row 9 auto-drop: U-001 \(stuck: question: which sign\?\) U-002 \(blocked by U-001\)/);
+    const output = r.sh("$S next G-1");
+    assert.match(output, /U-001: stuck -> dropped[\s\S]*U-002: planned -> dropped[\s\S]*row 10 integrate/);
+    assert.match(r.read(".swarm/G-1/plan.md"), /\| U-001 \|.*\| dropped \| 0 \| auto: question: which sign\? \|/);
   });
 });
 

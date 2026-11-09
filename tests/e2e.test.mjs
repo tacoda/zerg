@@ -127,7 +127,8 @@ test("holdout command lives outside the repo", () => {
 });
 step("an open finding blocks baseline", "$S baseline G-1", /not routed/);
 step("next says amend", "$S next G-1", /row 4 amend: U-001/);
-step("amend", "$S amend G-1 U-001 keep add unchanged", /task amended/);
+step("amend takes the finding from the log", "$S amend G-1 U-001 && grep '^| U-001 ' .swarm/G-1/plan.md", /Also: keep add unchanged/);
+step("amend with nothing open is refused", "$S amend G-1 U-001", /no open finding/);
 step("baseline: all checks fail first", "$S baseline G-1", /"passing_before_work": \[\]/);
 step("only U-001 is ready", "$S lease G-1 U-002", /not ready/);
 test("setup runs in every new worktree, and a failing setup leases nothing", () => {
@@ -145,11 +146,11 @@ test("lease makes a worktree outside the repo", () => {
   assert.ok(fs.existsSync(path.join(tree("U-001"), ".deps", "ready")), "setup ran in the worktree");
 });
 step("a live lease makes next wait", "$S next G-1", /row 7 wait: U-001 still leased/);
-test("a lease whose worktree is gone is an orphan", () => {
+test("a lease whose worktree is gone is an orphan, and next reclaims it", () => {
   sh(`git worktree remove --force "${tree("U-001")}"`);
-  assert.match(sh("$S next G-1"), /row 7 orphans: U-001/);
+  assert.match(sh("$S peek G-1"), /row 7 orphans: U-001/);
+  assert.match(sh("$S next G-1"), /U-001: leased -> planned[\s\S]*row 8 implement: U-001/);
 });
-step("the orphan goes back to planned", "$S move G-1 U-001 planned 'lease lost'", /leased -> planned/);
 step("and is leased again", "$S lease G-1 U-001", /worktree/);
 test("answer refuses a unit that isn't stuck, and leaves the contract alone", () => {
   assert.match(sh("$S answer G-1 U-002 decide"), /not stuck/);
@@ -159,6 +160,11 @@ step("rescope works on a planned unit", "$S rescope G-1 U-002 src/mul.py 'examin
 step("brief names the role file", "$S brief G-1 worker U-001", /references\/worker\.md/);
 step("brief quotes the script path", "$S brief G-1 worker U-001", /S: node ".*swarm\.mjs"/);
 step("a verifier's brief has its own temp folder", "$S brief G-1 verifier U-001", /TMP: .*zerg-verify-/);
+step("a unit verifier's brief names its diff", "$S brief G-1 verifier U-001", /DIFF: git diff swarm\/G-1\.\.\.unit\/G-1\/U-001/);
+test("the whole verifier's diff starts after the infrastructure commit and leaves out .swarm", () => {
+  const infra = sh("git log --format=%H --grep 'infrastructure:' -1").trim();
+  assert.match(sh("$S brief G-1 verifier whole"), new RegExp(`DIFF: git diff ${infra} swarm/G-1 -- \\. ':\\(exclude\\)\\.swarm'`));
+});
 
 test("a path-traversal unit id is refused and nothing is deleted", () => {
   assert.match(sh("$S report G-1 ../../.. gave_up x"), /unit id must look like U-001/);
@@ -251,6 +257,7 @@ step("add-fix runs only once", "$S add-fix G-1 again src/again.py", /runs once p
 step("the human waives the whole review", "$S waive G-1 whole 'duplication accepted for now'", /whole: waived/);
 step("prove C1", "$S prove G-1 C1 \"PYTHONPATH=src python3 -c 'from calc import sub; assert sub(5, 3) == 2'\" && tail -1 .swarm/G-1/log.md", /\| proof \|/);
 step("a failing proof is refused", "$S prove G-1 C2 false", /not proven/);
+step("a criterion with no command in the contract needs one", "$S prove G-1 C2", /gives it no command/);
 step("waive needs a reason", "$S waive G-1 C2", /needs a reason/);
 step("the human waives C2", "$S waive G-1 C2 'covered by the integration suite' && tail -1 .swarm/G-1/log.md", /\| proved \|/);
 

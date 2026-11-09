@@ -191,6 +191,15 @@ export function grepCriteria(text) {
   return pairs;
 }
 
+/** The command a criterion carries in the contract: its absence greps, negated, or a body that is one backticked
+ * command. '' when the contract gives none. @param {string} text @param {string} cid */
+export function criterionCommand(text, cid) {
+  const greps = grepCriteria(text).filter(([c]) => c === cid).map(([, cmd]) => `! ${cmd}`);
+  if (greps.length) return greps.join(" && ");
+  const body = new RegExp(`^- ${cid}:(.*)$`, "m").exec(section(text, "Criteria"))?.[1].trim() ?? "";
+  return /^`([^`]+)`\.?$/.exec(body)?.[1] ?? "";
+}
+
 /** @param {string} output */
 export const grepHitFiles = (output) =>
   [...new Set(lines(output).filter((l) => l.trim()).map((l) => partition(l, ":")[0]))].sort();
@@ -325,7 +334,7 @@ export const ARG_KINDS = {
 };
 /** What each command's arguments after the goal must be. A null slot is free text. */
 export const ARG_SHAPES = {
-  report: ["unit"], produced: ["unit"], check: ["unit"], merge: ["unit"], revise: ["unit"], move: ["unit"],
+  report: ["unit"], check: ["unit"], merge: ["unit"], move: ["unit"],
   amend: ["unit"], rescope: ["unit"], review: ["unit|whole"], answer: ["unit|goal"], brief: [null, "unit|-"], tokens: ["word"],
   waive: ["criterion|whole"],
 };
@@ -478,7 +487,7 @@ export const blockedUnits = (units) => [...blockers(units).keys()];
 
 /** Row 9's detail: which units are stuck, and which wait on them. A blocked unit is resolved through its blocker. */
 export function stuckDetail(units) {
-  const stuck = idsIn(units, "stuck").map((uid) => `${uid} (stuck)`);
+  const stuck = units.filter((u) => u.state === "stuck").map((u) => `${u.unit} (stuck${u.note ? `: ${u.note}` : ""})`);
   const blocked = [...blockers(units)].map(([uid, deps]) => `${uid} (blocked by ${deps.join(", ")})`);
   return [...stuck, ...blocked].join(" ");
 }

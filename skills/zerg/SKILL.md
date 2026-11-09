@@ -55,20 +55,20 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 | 2 | `scope`, `plan` | Plan the goal (see Planning). |
 | 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
 | 4 | `define` | Run the examiner: `S brief <goal> examiner`. It records its checks with `S define`. |
-| 4 | `amend` | For each unit listed, run `S amend <goal> <unit> "<finding>"`, using the finding from `log.md`. If a finding needs a file outside the unit's scope, ask the human, who can `rescope` the unit. |
+| 4 | `amend` | For each unit listed, run `S amend <goal> <unit>`. It adds the unit's findings from `log.md` to its task. If a finding needs a file outside the unit's scope, ask the human first, who can `rescope` the unit. |
 | 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again: `S brief <goal> examiner` now names them under `Strengthen:`. |
 | 6 | `check` | Run `S check <goal> <unit>` for each unit. Failures revise themselves. |
 | 6 | `review` | Run a verifier per unit: `S brief <goal> verifier <unit>`. It records its verdict with `S review`. |
 | 6 | `merge` | Run `S merge <goal> <unit>` for each unit. |
-| 7 | `orphans` | A listed lease lost its worktree or outlived `lease_minutes`. For each unit: `S move <goal> <unit> planned "lease lost"`. `move` handles only this and drops; every other state change goes through its gate. |
+| 7 | `orphans` | Only `S peek` shows this row: `S next` already moves a lease that lost its worktree or outlived `lease_minutes` back to planned. Run `S next`. |
 | 7 | `wait` | Workers still hold leases. Wait for them to report, then run `S next` again. |
 | 8 | `implement` | Run `S lease <goal> <units>`, then a worker per unit: `S brief <goal> worker <unit>`. Each records its result with `S report`. |
-| 9 | `interrupt` | For each unit marked `(stuck)`, read its `note` in `plan.md` and ask the human one question (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
-| 9 | `auto-drop` | For each listed unit: `S move <goal> <unit> dropped "auto: <note>"`. Goal-level questions are never auto-dropped; they always come as `interrupt`. |
+| 9 | `interrupt` | For each unit marked `(stuck: <note>)`, ask the human one question about that note (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
+| 9 | `auto-drop` | Only `S peek` shows this row: under `auto`, `S next` already drops stuck units and the units they block. Run `S next`. Goal-level questions are never dropped; they always come as `interrupt`. |
 | 10 | `integrate` | Run `S integrate <goal>`. Report holdout as pass or fail only. A failure becomes a goal-level `interrupt` on the next pass. |
 | 11 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. It records its advisory findings and its verdict itself. |
 | 11 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
-| 12 | `prove` | For each criterion listed, run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves a criterion, ask the human, who can `waive` it or `reopen` the goal. |
+| 12 | `prove` | For each criterion listed, run `S prove <goal> <C>`. If the contract gives the criterion no command, `S prove` says so: run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves it, ask the human, who can `waive` it or `reopen` the goal. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
 | 14 | `handoff` | Run `S handoff <goal>` and print its report. Stop. |
 | 15 | `done` | The goal was handed off. Nothing is left to do. |
@@ -83,7 +83,8 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
    `ln -s "$MAIN/node_modules" node_modules`. `MAIN` is the repo root. What setup creates must be gitignored.
 4. Fill in `.swarm/<goal>/contract.md`:
    - Make every criterion observable.
-   - Write a criterion about a string's absence as a backticked `grep ...` command.
+   - Write a criterion about a string's absence as a backticked `grep ...` command. `S prove` passes it when grep finds nothing.
+   - Write a criterion that one command shows as that command alone, in backticks: ``- C5: `npm ci && npm test` ``. `S prove` runs it.
    - Use Constraints to name edge cases and behavior that must not change.
 5. Fill in `.swarm/<goal>/plan.md`:
    - Give each unit a scope of product files only, plus `after` and `criteria`.
@@ -102,7 +103,7 @@ Record answers through the script, never by editing files:
 | a decision for the goal | `S answer <goal> goal "<q>: <a>"` |
 | a decision for a unit | `S answer <goal> <unit> "<text>"` |
 | change a stuck or planned unit's scope | `S rescope <goal> <unit> "<scope>" "<why>"` |
-| drop a unit | `S move <goal> <unit> dropped "<why>"` |
+| drop a stuck or planned unit | `S move <goal> <unit> dropped "<why>"` |
 | fix after a goal-level failure | `S reopen <goal> "<task>" "<scope>" "<why>"` |
 | accept a criterion without proof | `S waive <goal> <C> "<why>"` |
 | accept the whole change despite a blocking review | `S waive <goal> whole "<why>"` |

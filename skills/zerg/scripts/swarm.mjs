@@ -18,7 +18,7 @@ import {
   ARG_KINDS, ARG_SHAPES, BOUNDS, CLOSED, COLUMNS, GOAL_ID,
   IGNORES, MANUAL_MOVES, NOT_TREE, PASSES_PER_UNIT, ROLES, SECRET,
   SECTIONS, SHELL_META, TRANSITIONS, UNIT_ID, WILD, argProblem,
-  blockedUnits, boundHit, charClass, checkTransition, clean, criteria, oneLine, parseLogLine,
+  blockedUnits, boundHit, charClass, checkTransition, clean, criteria, criterionCommand, oneLine, parseLogLine,
   derive, deriveClose, deriveGates, derivePrep, deriveUnits, endWord,
   escapeRe, fingerprint, fnmatch, globOverlap, globToken, globsOverlap,
   goalEvents, grepArgv, grepCriteria, grepHitFiles, grepProblems, idsIn,
@@ -39,19 +39,18 @@ const USAGE = `zerg control plane
   approve <goal> [ask|auto]           lint + clean tree + green suite on base, then branch swarm/<goal>
   define <goal> U-001='cmd' .. [holdout='cmd'] [finding:U-001='text']   examiner's checks and findings;
                                       the holdout command and tests live outside the repo, in $ZERG_HOME/holdout
-  amend <goal> <unit> <text>          route an examiner finding into a planned unit's task
+  amend <goal> <unit> [text]          route an examiner finding into a planned unit's task; the log's by default
   baseline <goal>                     every unit check must fail before any work
-  next <goal>                         the derive table: prints the one next action, counts a pass
+  next <goal>                         the derive table: reclaims lost leases, auto-drops under auto, then
+                                      prints the one next action and counts a pass
   peek <goal>                         the same row, without counting a pass
   summary <goal>                      the approval brief, built from contract.md and plan.md
   lease <goal> <unit>..               STOP, budget, deps, parallelism; leased, with a worktree per unit
   brief <goal> <role> [unit]          the handoff text for a subagent (examiner, worker, verifier)
   report <goal> <unit> produced|escalated|gave_up [text]   a worker records its own result
   review <goal> <unit|whole> pass|fail [reason]            a verifier records its verdict
-  produced <goal> <unit> [summary]    accepted only if the unit branch has commits
   check <goal> <unit>                 scope + unit check in a temp worktree; revises on failure
   merge <goal> <unit>                 needs a recorded pass; merges, re-runs merged checks; rolls back on red
-  revise <goal> <unit> <note>         two strikes, or the same note word for word, makes it stuck
   move <goal> <unit> <state> [note]   by hand only: leased -> planned (lease lost), planned|stuck -> dropped
   answer <goal> <unit|goal> <text>    a human decision; a stuck unit goes back to planned
   rescope <goal> <unit> <scope> [why] a human decision: new scope for a stuck or planned unit
@@ -59,7 +58,7 @@ const USAGE = `zerg control plane
   waive <goal> <C|whole> <why>        a human decision: accept a criterion, or the whole change, without proof
   add-fix <goal> <task> <scope>       the orchestrator's one automatic fix for a blocking whole review
   integrate <goal>                    full suite + holdout; holdout reports pass/fail only
-  prove <goal> <criterion> <cmd..>    run evidence for one criterion; all proven -> proved
+  prove <goal> <criterion> [cmd..]    run evidence for one criterion, the contract's command by default
   stage <goal> whole-review|learned|finding [note]   \`learned\` routes learn.md: project lane to
                                       .swarm/LEARNINGS.md, zerg lane to $ZERG_HOME/inbox.md
   tokens <goal> <who> <stage> <n>     record a dispatch's token use
@@ -72,7 +71,7 @@ User layer, in $ZERG_HOME (default ~/.zerg), outside the skill so it survives up
   inbox                               pending zerg proposals routed by \`stage learned\`
   accept <id> [note]                  move a proposal into rules.md, which every goal reads
   dismiss <id> [reason]               archive a proposal without using it
-  config <key> <n>                    override max_revisions, max_passes, or no_progress`;
+  config <key> <n>                    override max_revisions, max_passes, no_progress, or lease_minutes`;
 
 const SCRIPT = fs.realpathSync(fileURLToPath(import.meta.url));
 const SKILL_DIR = path.dirname(path.dirname(SCRIPT));
@@ -631,8 +630,32 @@ function cmdPeek(goal) {
   say(`row ${row} ${action}: ${detail}`);
 }
 
+/** A lease whose worktree is gone or that outlived lease_minutes goes back to planned. */
+function reclaimLeases(goal) {
+  const units = loadUnits(goal);
+  for (const uid of orphanedLeases(leases(goal, units, entries(goal)), userBounds().lease_minutes)) {
+    removeWorktreeFor(`unit/${goal}/${uid}`);
+    moveUnit(goal, uid, "planned", "lease lost");
+  }
+}
+
+/** Under `auto`, stuck units drop, and so do the units they block. */
+function autoDrop(goal) {
+  const units = loadUnits(goal);
+  for (const u of units.filter((x) => x.state === "stuck")) moveUnit(goal, u.unit, "dropped", `auto: ${u.note}`);
+  for (const [uid, deps] of blockers(units)) moveUnit(goal, uid, "dropped", `auto: blocked by ${deps.join(", ")}`);
+}
+
+/** Rows that need no judgment are done here, so the orchestrator never sees them. */
+const AUTOMATIC = { orphans: reclaimLeases, "auto-drop": autoDrop };
+
+function settle(goal) {
+  for (let action = currentRow(goal).row[1]; action in AUTOMATIC; action = currentRow(goal).row[1]) AUTOMATIC[action](goal);
+}
+
 function cmdNext(goal) {
   if (!exists(goalDir(goal))) return cmdPeek(goal);
+  settle(goal);
   const { row: [row, action, detail], now } = currentRow(goal);
   log(goal, goal, "pass", now);
   save(goal, `pass: row ${row}`);
@@ -661,15 +684,6 @@ function commitsAhead(goal, uid) {
   const ref = `unit/${goal}/${uid}`;
   const known = git(["rev-parse", "--verify", "--quiet", ref], { check: false }).code === 0;
   return known ? parseInt(out(["rev-list", "--count", `swarm/${goal}..${ref}`]), 10) : 0;
-}
-
-function cmdProduced(goal, uid, summary = "") {
-  if (getUnit(loadUnits(goal), uid).state !== "leased") fail(`${uid} is not leased`);
-  if (!commitsAhead(goal, uid)) {
-    revise(goal, uid, `worker reported produced, but unit/${goal}/${uid} has no commits`);
-    exit(1);
-  }
-  moveUnit(goal, uid, "produced", summary);
 }
 
 function runInWorktree(goal, ref, command) {
@@ -757,13 +771,21 @@ function cmdReview(goal, subject, verdict, ...reason) {
   say(`${subject}: review pass; it merges next`);
 }
 
+/** What a verifier reads. For the whole goal: everything after zerg's infrastructure commit, minus its own state. */
+function diffCommand(goal, uid) {
+  if (uid !== "whole") return `git diff swarm/${goal}...unit/${goal}/${uid}`;
+  const base = parseHeader(contractText(goal)).base;
+  const infra = lines(out(["log", "--format=%H", "--grep", `^swarm ${goal}: infrastructure:`, `${base}..swarm/${goal}`])).pop();
+  return `git diff ${infra ? `${infra} swarm/${goal}` : `${base}...swarm/${goal}`} -- . ':(exclude).swarm'`;
+}
+
 /** The whole handoff for a subagent: identifiers and a role file, never a summary of the run. */
 function cmdBrief(goal, role, uid = "-") {
   if (!ROLES.includes(role)) fail(`role is one of ${ROLES.join(", ")}`);
   const text = [`You are the zerg ${role}. Read ${path.join(SKILL_DIR, "references", role + ".md")} and follow it exactly.`,
     `Goal: ${goal}`, `Unit: ${uid}`, `MAIN: ${root()}`, `S: node "${SCRIPT}"`];
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
-  if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`);
+  if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`, `DIFF: ${diffCommand(goal, uid)}`);
   if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
   const strengthen = role === "examiner" ? strengthenUnits(entries(goal), loadUnits(goal)) : [];
   if (strengthen.length) text.push(`Strengthen: ${strengthen.join(", ")}`);
@@ -836,9 +858,17 @@ function cmdAnswer(goal, subject, ...words) {
   say(`recorded decision for ${subject}`);
 }
 
-/** Route an examiner finding into the unit's task before any worker sees the unit. */
+/** The examiner's findings for a unit since it was last amended. */
+function pendingFindings(goal, uid) {
+  const rows = entries(goal).filter((e) => e.subject === uid);
+  const since = rows.map((e) => e.event).lastIndexOf("amended") + 1;
+  return rows.slice(since).filter((e) => e.event === "examiner-finding").map((e) => e.note);
+}
+
+/** Route an examiner finding into the unit's task before any worker sees the unit. With no text, the log's findings. */
 function cmdAmend(goal, uid, ...words) {
-  const text = clean(words.join(" "));
+  const text = clean(words.join(" ") || pendingFindings(goal, uid).join("; "));
+  if (!text) fail(`${uid} has no open finding; give the text to add`);
   const unit = getUnit(loadUnits(goal), uid);
   if (unit.state !== "planned") fail(`${uid} is ${unit.state}; amend a task only before its unit is leased`);
   updateUnit(goal, uid, { event: "amended", note: text, fields: { task: `${unit.task}. Also: ${text}` } });
@@ -934,7 +964,8 @@ function cmdProve(goal, criterion, ...command) {
   onSwarm(goal);
   const text = contractText(goal);
   if (!criteria(text).includes(criterion)) fail(`no criterion ${criterion}`);
-  const evidence = command.join(" ");
+  const evidence = command.join(" ") || criterionCommand(text, criterion);
+  if (!evidence) fail(`${criterion}: the contract gives it no command, so give one`);
   const [ok, output] = run(evidence, root());
   say(output);
   if (!ok) fail(`${criterion}: evidence command failed, so it is not proven`);
@@ -1047,8 +1078,7 @@ const USER_COMMANDS = { home: cmdHome, rules: cmdRules, inbox: cmdInbox, accept:
 const COMMANDS = {
   new: cmdNew, lint: cmdLint, approve: cmdApprove, define: cmdDefine, baseline: cmdBaseline,
   next: cmdNext, peek: cmdPeek, report: cmdReport, review: cmdReview, brief: cmdBrief, summary: cmdSummary,
-  lease: cmdLease, produced: cmdProduced, check: cmdCheck, merge: cmdMerge,
-  revise: (goal, uid, ...note) => revise(goal, uid, note.join(" ")),
+  lease: cmdLease, check: cmdCheck, merge: cmdMerge,
   move: (goal, uid, target, ...note) => {
     const state = getUnit(loadUnits(goal), uid).state;
     if (!MANUAL_MOVES.includes(`${state}>${target}`)) {
