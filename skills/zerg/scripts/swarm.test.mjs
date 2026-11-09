@@ -475,3 +475,10 @@ describe("batch 2 trust gates", () => {
     assert.deepEqual([...swarm.settledCriteria(rows)].sort(), ["C2", "C3"]);
   });
 });
+
+test("a plan of more than 6 units is more than one goal; fix units don't count", () => {
+  const rows = (n, prefix = "U") => Array.from({ length: n }, (_, i) => unit(`${prefix}-00${i + 1}`, `src/f${prefix}${i}.py`, { criteria: "C1" }));
+  assert.deepEqual(swarm.planProblems(rows(6), ["C1"]), []);
+  assert.match(swarm.planProblems(rows(7), ["C1"]).join("\n"), /plan: 7 units; plan the first 6 or fewer/);
+  assert.deepEqual(swarm.planProblems([...rows(6), ...rows(2, "F").map((u, i) => ({ ...u, unit: `F-${i + 1}` }))], ["C1"]), []);
+});

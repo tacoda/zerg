@@ -78,7 +78,7 @@ export function definedGoal(r, goal = "G-1") {
   r.write("tests/test_sub.py", pyTest("sub", "calc import sub", "self.assertEqual(sub(5, 3), 2)"));
   r.write("tests/test_mul.py", pyTest("mul", "mul import mul", "self.assertEqual(mul(2, 3), 6)"));
   return r.sh(`$S define ${goal} 'U-001=PYTHONPATH=src python3 -m unittest tests.test_sub -q' ` +
-    `'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q'`);
+    `'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q' 'holdout=PYTHONPATH=src python3 -m unittest tests.test_calc -q'`);
 }
 
 export const TWO_UNITS = [

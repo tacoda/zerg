@@ -35,8 +35,8 @@ Review my zerg lessons.
 You're asked for three kinds of decision, and nothing else:
 - **Approve** the plan, once. You can also choose `auto` here, which drops stuck units instead of asking.
 - **Decide** when the swarm can't move on its own: a stuck unit (answer, rescope, or drop it), or a goal-level
-  failure (`reopen` with a fix unit, `waive` a criterion or the whole review, or stop). `auto` never decides these
-  goal-level questions for you.
+  failure (`reopen` with a fix unit, `waive` a criterion or the whole review, or `abandon` the goal). `auto` never
+  decides these goal-level questions for you.
 - **Merge** the branch at the end.
 
 To stop new work at any time, run `touch .swarm/STOP`. Don't edit files in the main tree during a run: the swarm owns it

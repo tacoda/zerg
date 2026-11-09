@@ -159,7 +159,7 @@ test("answer refuses a unit that isn't stuck, and leaves the contract alone", ()
 step("rescope works on a planned unit", "$S rescope G-1 U-002 src/mul.py 'examiner finding needs it'", /U-002: scope src\/mul\.py/);
 step("brief names the role file", "$S brief G-1 worker U-001", /references\/worker\.md/);
 step("brief quotes the script path", "$S brief G-1 worker U-001", /S: node ".*swarm\.mjs"/);
-step("a verifier's brief has its own temp folder", "$S brief G-1 verifier U-001", /TMP: .*zerg-verify-/);
+step("a verifier's brief has its own temp folder", "$S brief G-1 verifier U-001", /TMP: .*\/work\/.*\/G-1\/verify-/);
 step("a unit verifier's brief names its diff", "$S brief G-1 verifier U-001", /DIFF: git diff swarm\/G-1\.\.\.unit\/G-1\/U-001/);
 test("the whole verifier's diff starts after the infrastructure commit and leaves out .swarm", () => {
   const infra = sh("git log --format=%H --grep 'infrastructure:' -1").trim();
@@ -308,4 +308,7 @@ step("accept into rules", `$S accept repo/G-1/P1 keep`, /rules\.md/);
 step("rules prints them for every role", "$S rules", /demo zerg rule/);
 step("handoff shows the waiver", "$S handoff G-1", /C2: WAIVED: covered by the integration suite[\s\S]*checked out main/);
 step("no leftover worktrees", "git worktree list | wc -l", /^\s*1$/m);
+step("merged unit branches are deleted", "git branch --list 'unit/G-1/*' | wc -l", /^\s*0$/m);
+test("the goal's scratch folders are gone", () => assert.ok(!fs.readdirSync(path.join(HOME, "work")).some((d) =>
+  fs.existsSync(path.join(HOME, "work", d, "G-1")))));
 step("state lives on the branch only", "$S status G-1", /check it out first/);

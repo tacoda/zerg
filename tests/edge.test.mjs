@@ -30,6 +30,14 @@ describe("approve gates", () => {
     assert.match(r.sh("$S approve G-1 ask"), /the suite is red on base/);
     r.sh("git rm -q tests/test_red.py && git commit -qm green");
   });
+  test("with a setup that fails, or leaves files git would see", () => {
+    const contract = ".swarm/G-1/contract.md";
+    r.edit(contract, "setup:\n", "setup: exit 4\n");
+    assert.match(r.sh("$S approve G-1 ask"), /setup failed/);
+    r.edit(contract, "setup: exit 4\n", "setup: touch made-by-setup\n");
+    assert.match(r.sh("$S approve G-1 ask"), /setup leaves files git doesn't ignore; gitignore them: made-by-setup/);
+    r.edit(contract, "setup: touch made-by-setup\n", "setup:\n");
+  });
   test("when swarm/<goal> already exists", () => {
     assert.match(r.sh("git branch swarm/G-1 && $S approve G-1 ask"), /swarm\/G-1 already exists/);
     r.sh("git branch -q -D swarm/G-1");
@@ -47,6 +55,12 @@ describe("define guards and the fail-first baseline", () => {
     plannedGoal(r, { rows: TWO_UNITS });
     assert.match(r.sh("$S approve G-1 ask"), /on swarm\/G-1/);
   });
+  test("define without a holdout leaves the goal undefined, and a no-op holdout is refused", () => {
+    r.write("tests/test_sub.py", pyTest("sub", "calc import sub", "self.assertEqual(sub(5, 3), 2)"));
+    assert.match(r.sh("$S define G-1 'holdout=true'"), /passes whatever the code does/);
+    assert.match(r.sh("$S define G-1 'U-001=PYTHONPATH=src python3 -m unittest tests.test_sub -q' 'U-002=false'"), /not defined yet/);
+    assert.match(r.sh("$S next G-1"), /row 4 define/);
+  });
   test("an examiner edit to a product file is refused", () => {
     r.write("src/calc.py", "def add(a, b):\n    return a + b + 0\n");
     assert.match(r.sh("$S define G-1 'U-001=true'"), /changed product or state files: src\/calc\.py/);
@@ -59,7 +73,8 @@ describe("define guards and the fail-first baseline", () => {
   });
   test("a check that already passes blocks the baseline", () => {
     r.write("tests/test_mul.py", pyTest("mul", "mul import mul", "self.assertEqual(mul(2, 3), 6)"));
-    assert.match(r.sh("$S define G-1 'U-001=true' 'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q'"), /checks recorded/);
+    assert.match(r.sh("$S define G-1 'U-001=true' 'U-002=PYTHONPATH=src python3 -m unittest tests.test_mul -q' " +
+      "'holdout=PYTHONPATH=src python3 -m unittest tests.test_calc -q'"), /checks recorded/);
     const output = r.sh("$S baseline G-1; echo exit=$?");
     assert.match(output, /"passing_before_work": \[\s*"U-001"\s*\]/);
     assert.match(output, /exit=1/);
@@ -154,6 +169,26 @@ describe("auto mode drops stuck units without the orchestrator", () => {
     const output = r.sh("$S next G-1");
     assert.match(output, /U-001: stuck -> dropped[\s\S]*U-002: planned -> dropped[\s\S]*row 10 integrate/);
     assert.match(r.read(".swarm/G-1/plan.md"), /\| U-001 \|.*\| dropped \| 0 \| auto: question: which sign\? \|/);
+  });
+});
+
+describe("abandon", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("needs a reason, then keeps swarm/<goal> and removes the rest", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    r.sh("$S approve G-1 ask");
+    definedGoal(r);
+    r.sh("$S baseline G-1 && $S lease G-1 U-001");
+    const worktree = r.tree("G-1", "U-001");
+    const holdout = /HOLDOUT: (.+)/.exec(r.sh("$S brief G-1 examiner"))?.[1] ?? "";
+    assert.match(r.sh("$S abandon G-1"), /needs a reason/);
+    assert.match(r.sh("$S abandon G-1 wrong approach"), /abandoned[\s\S]*checked out main/);
+    assert.equal(r.sh("git branch --show-current").trim(), "main");
+    assert.ok(!fs.existsSync(worktree) && !fs.existsSync(holdout), "the worktree and the holdout are gone");
+    assert.equal(r.sh("git branch --list 'unit/G-1/*'").trim(), "");
+    assert.match(r.sh("git show swarm/G-1:.swarm/G-1/contract.md"), /goal: abandoned: wrong approach/);
+    assert.match(r.sh("git checkout -q swarm/G-1 && $S peek G-1; git checkout -q main"), /row 15 done: the human abandoned this goal/);
   });
 });
 

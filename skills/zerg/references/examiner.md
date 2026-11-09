@@ -10,7 +10,8 @@ Your brief gives you `Goal`, `MAIN`, `HOLDOUT`, and `S`, and sometimes `Strength
    - Put the tests where the project keeps its tests, in its style, so they stay as regression tests after the merge.
    - Each test must fail on the current code. Run it, and confirm it fails because the behavior is missing, not because of an import or setup error.
    - For a unit named in `Strengthen`, make its tests strictly stronger. Never loosen a test.
-3. Write holdout tests in `HOLDOUT`. They check what the unit tests skip:
+3. Write holdout tests in `HOLDOUT`. Every goal needs them: the goal isn't defined until `holdout=` names their command.
+   They check what the unit tests skip:
    every Constraint, the edge cases, and behavior that must not change.
    Run their command once, from the repo root, and confirm it actually runs the tests.
    They run with `MAIN` as the working directory but sit outside it, so import product code the way the project's

@@ -35,14 +35,14 @@ flowchart TD
     MG --> ALL{every unit merged or dropped?}
     ALL -- no --> L
     ALL -- yes --> I{Row 10 integrate: full suite and holdout}
-    I -- fail --> G1{{Row 9 goal question: reopen or stop}}
+    I -- fail --> G1{{Row 9 goal question: reopen or abandon}}
     G1 -- reopen --> L
     I -- pass --> PR{Row 11 prove every criterion}
     PR -- no command proves one --> G3{{waive it, or reopen}}
     G3 --> PR
     PR -- all proven or waived --> WR[[Row 12 whole review: the change and its proofs]]
     WR -- blocking, first time --> AF[add-fix] --> L
-    WR -- blocking again --> G2{{Row 9 goal question: reopen, waive whole, or stop}}
+    WR -- blocking again --> G2{{Row 9 goal question: reopen, waive whole, or abandon}}
     G2 -- reopen --> L
     G2 -- waive --> LE
     WR -- pass --> LE[Row 13 learn: route both lanes]

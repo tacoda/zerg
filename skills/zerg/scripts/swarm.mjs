@@ -63,7 +63,8 @@ const USAGE = `zerg control plane
                                       .swarm/LEARNINGS.md, zerg lane to $ZERG_HOME/inbox.md
   tokens <goal> <who> <stage> <n>     record a dispatch's token use
   status <goal>                       unit table, goal events, token totals
-  handoff <goal>                      final report, then check out base
+  handoff <goal>                      final report, clean up, then check out base
+  abandon <goal> <why>                a human decision: stop for good; keeps swarm/<goal> as the record
 
 User layer, in $ZERG_HOME (default ~/.zerg), outside the skill so it survives updates:
   home                                paths and the bounds in effect
@@ -482,16 +483,23 @@ function cmdLint(goal) {
   if (problems.length) exit(1);
 }
 
-/** Everything approve needs before it touches a branch. Resuming means a crash left us on swarm/<goal>. */
+/** A fresh approve starts on base, with no swarm/<goal> yet. Resuming means a crash left us on swarm/<goal>. */
+function branchChecks(goal, header) {
+  if (branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
+  if (git(["rev-parse", "--verify", "--quiet", `swarm/${goal}`], { check: false }).code === 0) {
+    fail(`swarm/${goal} already exists; check it out to finish approving, or delete it to start over`);
+  }
+}
+
+/** Everything approve needs before it touches a branch. */
 function approveChecks(goal, header, resuming) {
   const problems = allPlanProblems(goal);
   if (problems.length) fail("plan fails lint:\n" + problems.join("\n"));
-  if (!resuming && branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
-  if (!resuming && git(["rev-parse", "--verify", "--quiet", `swarm/${goal}`], { check: false }).code === 0) {
-    fail(`swarm/${goal} already exists; check it out to finish approving, or delete it to start over`);
-  }
+  if (!resuming) branchChecks(goal, header);
   const foreign = dirtyPaths().filter((p) => !p.startsWith(`.swarm/${goal}/`) && !p.startsWith(".gitignore"));
   if (foreign.length) fail("tree not clean: " + foreign.join(", "));
+  const setup = setupProblem(goal);
+  if (setup) fail(setup);
   const [ok, output] = run(header.test, root());
   if (!ok) fail("the suite is red on base, so the swarm can't tell its breakage from what's already broken:\n" + output);
 }
@@ -531,6 +539,7 @@ function defineInput(units, pairs) {
 }
 
 function addDefinePair(input, units, key, value) {
+  if (key === "holdout" && isNoOp(value)) fail(`holdout: \`${value}\` passes whatever the code does`);
   if (key === "holdout") return void (input.holdout = value);
   if (key.startsWith("finding:")) return void input.findings.push([getUnit(units, partition(key, ":")[2]).unit, value]);
   getUnit(units, key);
@@ -540,6 +549,13 @@ function addDefinePair(input, units, key, value) {
 
 const examinerFiles = (goal) =>
   [...new Set(entries(goal).filter((e) => e.event === "test-files").flatMap((e) => splitList(e.note)))];
+
+/** A goal is defined when every open unit has a check and the holdout has a command. */
+function markDefined(goal, units) {
+  if (!units.every((u) => u.check || CLOSED.includes(u.state))) return;
+  if (holdoutCommand(goal)) log(goal, goal, "defined");
+  else say("not defined yet: record the holdout tests' command with holdout=<command>");
+}
 
 function cmdDefine(goal, ...pairs) {
   require(goal, "approved");
@@ -559,7 +575,7 @@ function cmdDefine(goal, ...pairs) {
     log(goal, goal, "test-files", written.join(", "));
     git(["add", "--", ...written]);
   }
-  if (units.every((u) => u.check || CLOSED.includes(u.state))) log(goal, goal, "defined");
+  markDefined(goal, units);
   save(goal, `tests for ${[...checks.keys()].join(", ") || "holdout"}`);
   say(`checks recorded for ${[...checks.keys()].join(", ") || "none"}`);
 }
@@ -686,18 +702,31 @@ function commitsAhead(goal, uid) {
   return known ? parseInt(out(["rev-list", "--count", `swarm/${goal}..${ref}`]), 10) : 0;
 }
 
-function runInWorktree(goal, ref, command) {
-  const tree = userDir("work", goal, `check-${ref.replaceAll("/", "-")}`);
+/** Runs fn in a throwaway detached checkout of ref, after the contract's setup, and always removes it. */
+function inTempWorktree(goal, ref, fn) {
+  const tree = userDir("work", goal, `temp-${ref.replaceAll("/", "-")}`);
   git(["worktree", "remove", "--force", tree], { check: false });
   rmrf(tree);
   fs.mkdirSync(path.dirname(tree), { recursive: true });
   git(["worktree", "add", "-q", "--detach", tree, ref]);
   try {
     const setup = runSetup(goal, tree);
-    return setup[0] ? run(command, tree) : [false, `setup failed:\n${setup[1]}`];
+    return setup[0] ? fn(tree) : [false, `setup failed:\n${setup[1]}`];
   } finally {
     git(["worktree", "remove", "--force", tree], { check: false });
   }
+}
+
+const runInWorktree = (goal, ref, command) => inTempWorktree(goal, ref, (tree) => run(command, tree));
+
+/** A setup that fails, or leaves files git would see, would break every lease, so approve tries it first. */
+function setupProblem(goal) {
+  if (!parseHeader(contractText(goal)).setup) return null;
+  const [ok, output] = inTempWorktree(goal, "HEAD", (tree) => {
+    const seen = parsePorcelainZ(git(["status", "--porcelain", "-z", "--untracked-files=all"], { cwd: tree }).stdout);
+    return [!seen.length, `setup leaves files git doesn't ignore; gitignore them: ${seen.slice(0, 5).join(", ")}`];
+  });
+  return ok ? null : output;
 }
 
 function cmdCheck(goal, uid) {
@@ -773,6 +802,13 @@ function cmdReview(goal, subject, verdict, ...reason) {
   say(`${subject}: review pass; it merges next`);
 }
 
+/** A verifier's scratch folder, under the goal's work folder so hand-off and abandon remove it. */
+function makeTmp(goal) {
+  const dir = userDir("work", goal);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.mkdtempSync(path.join(dir, "verify-"));
+}
+
 /** Each criterion and what settled it, for the whole review to judge. */
 function proofLines(goal) {
   const settled = settlements(entries(goal));
@@ -794,7 +830,7 @@ function cmdBrief(goal, role, uid = "-") {
   const text = [`You are the zerg ${role}. Read ${path.join(SKILL_DIR, "references", role + ".md")} and follow it exactly.`,
     `Goal: ${goal}`, `Unit: ${uid}`, `MAIN: ${root()}`, `S: node "${SCRIPT}"`];
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
-  if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`, `DIFF: ${diffCommand(goal, uid)}`);
+  if (role === "verifier") text.push(`TMP: ${makeTmp(goal)}`, `DIFF: ${diffCommand(goal, uid)}`);
   if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
   if (role === "verifier" && uid === "whole") text.push("Proofs:", ...proofLines(goal));
   const strengthen = role === "examiner" ? strengthenUnits(entries(goal), loadUnits(goal)) : [];
@@ -1050,14 +1086,19 @@ function cmdStatus(goal) {
   say("tokens:\n" + tokenLines(rows).join("\n"));
 }
 
-/** Worker worktrees outlive their agents when they hold commits; the branches keep the work. */
-function removeUnitWorktrees(goal) {
+/** Removes the goal's worktrees and scratch folders, and every unit branch already merged. Unmerged work stays. */
+function cleanUp(goal) {
   for (const tree of worktrees()) {
     if ((tree.branch ?? "").startsWith(`refs/heads/unit/${goal}/`)) {
       git(["worktree", "remove", "--force", tree.worktree], { check: false });
       say(`removed worktree ${tree.worktree}`);
     }
   }
+  rmrf(userDir("work", goal));
+  git(["worktree", "prune"], { check: false });
+  const refs = lines(out(["for-each-ref", "--format=%(refname:short)", `refs/heads/unit/${goal}/`]));
+  const kept = refs.filter((ref) => git(["branch", "-q", "-d", ref], { check: false }).code !== 0);
+  if (kept.length) say(`kept unmerged branches: ${kept.join(", ")}`);
 }
 
 function cmdHandoff(goal) {
@@ -1079,9 +1120,26 @@ function cmdHandoff(goal) {
   say(`note: the merge also adds these .gitignore lines: ${IGNORES.join(", ")}`);
   log(goal, goal, "handed-off");
   save(goal, "handed off");
-  removeUnitWorktrees(goal);
+  cleanUp(goal);
+  say(`holdout tests: ${holdoutDir(goal)}`);
   git(["checkout", "-q", base]);
   say(`\nchecked out ${base}. Review, then merge swarm/${goal} yourself.`);
+}
+
+/** A human decision: stop the goal for good. swarm/<goal> stays as the record; everything else zerg made goes. */
+function cmdAbandon(goal, ...why) {
+  const reason = why.join(" ").trim();
+  if (!reason) fail("abandon needs a reason; it goes in the contract");
+  require(goal, "approved");
+  onSwarm(goal);
+  addDecision(goal, "goal", `abandoned: ${reason}`);
+  log(goal, goal, "abandoned", reason);
+  save(goal, "abandoned");
+  cleanUp(goal);
+  rmrf(holdoutDir(goal));
+  const base = parseHeader(contractText(goal)).base;
+  git(["checkout", "-q", base]);
+  say(`${goal}: abandoned. swarm/${goal} keeps the record; checked out ${base}.`);
 }
 
 const LOCK_FREE = new Set(["peek", "status", "summary", "brief", "lint"]);
@@ -1100,7 +1158,7 @@ const COMMANDS = {
     moveUnit(goal, uid, target, note.join(" "));
   },
   answer: cmdAnswer, rescope: cmdRescope, amend: cmdAmend, "add-fix": cmdAddFix, reopen: cmdReopen, waive: cmdWaive,
-  integrate: cmdIntegrate, prove: cmdProve, stage: cmdStage, tokens: cmdTokens, status: cmdStatus, handoff: cmdHandoff,
+  abandon: cmdAbandon, integrate: cmdIntegrate, prove: cmdProve, stage: cmdStage, tokens: cmdTokens, status: cmdStatus, handoff: cmdHandoff,
 };
 
 function dispatch(command, args) {

@@ -32,6 +32,8 @@ export const CLOSED = ["merged", "dropped"];
 export const BOUNDS = { max_revisions: 2, max_passes: 20, no_progress: 3, lease_minutes: 60 };
 // A clean unit still takes about 4 passes (implement, check, review, merge), so the cap grows with the plan.
 export const PASSES_PER_UNIT = 5;
+// More than this is more than one goal: a plan this long hides a second outcome.
+export const MAX_UNITS = 6;
 
 /** @typedef {{unit: string, task: string, scope: string, after: string, criteria: string, check: string, state: string, revisions: string, note: string}} Unit */
 /** @typedef {{ts?: string, subject: string, event: string, note: string}} Entry */
@@ -407,7 +409,9 @@ export function rowProblems(unit, ids, crits) {
 /** @param {Unit[]} units @param {string[]} crits */
 export function planProblems(units, crits) {
   const ids = units.map((u) => u.unit);
+  const planned = units.filter((u) => u.unit.startsWith("U-")).length;
   const problems = units.length ? [] : ["plan: no units"];
+  if (planned > MAX_UNITS) problems.push(`plan: ${planned} units; plan the first ${MAX_UNITS} or fewer as this goal, and name the rest as later goals`);
   problems.push(...[...new Set(ids.filter((i) => ids.indexOf(i) !== ids.lastIndexOf(i)))].sort().map((i) => `plan: duplicate unit ${i}`));
   units.forEach((u) => problems.push(...rowProblems(u, ids, crits)));
   const covered = new Set(units.flatMap((u) => splitList(u.criteria)));
@@ -587,6 +591,7 @@ export const idsIn = (units, state) => units.filter((u) => u.state === state).ma
 
 /** Rows 0 to 3: stop signals and the plan gate. */
 export function deriveGates(s) {
+  if (s.events.has("abandoned")) return [15, "done", "the human abandoned this goal"];
   if (s.stop) return [0, "stop", ".swarm/STOP is present"];
   if (s.bound) return [1, "stop", s.bound];
   if (!s.has_contract) return [2, "scope", "run `new`, write contract.md and plan.md, then `lint`"];
@@ -637,12 +642,12 @@ export function deriveUnits(s) {
 export function deriveClose(s) {
   const ev = s.events;
   // Goal-level decisions belong to the human under every autonomy setting: auto only drops units.
-  if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, or stop"];
+  if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, or `abandon`"];
   if (!ev.has("integrated")) return [10, "integrate", "run `integrate`"];
   if (s.unproven.length) return [11, "prove", s.unproven.join(" ")];
   if (!ev.has("whole-review")) {
     if (ev.has("whole-blocking")) {
-      if (s.fix_exists) return [9, "interrupt", "goal: the whole review is blocking again; `reopen`, `waive <goal> whole`, or stop"];
+      if (s.fix_exists) return [9, "interrupt", "goal: the whole review is blocking again; `reopen`, `waive <goal> whole`, or `abandon`"];
       return [12, "add-fix", "run `add-fix` for the blocking finding in the log"];
     }
     return [12, "whole-review", "dispatch a verifier with `brief <goal> verifier whole`"];

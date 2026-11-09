@@ -53,7 +53,7 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 |---|---|---|
 | 0, 1 | `stop` | Report the detail. Stop. |
 | 2 | `scope`, `plan` | Plan the goal (see Planning). |
-| 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
+| 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. If they stop, do nothing more: nothing was branched yet. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
 | 4 | `define` | Run the examiner: `S brief <goal> examiner`. It records its checks with `S define`. |
 | 4 | `amend` | For each unit listed, run `S amend <goal> <unit>`. It adds the unit's findings from `log.md` to its task. If a finding needs a file outside the unit's scope, ask the human first, who can `rescope` the unit. |
 | 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again: `S brief <goal> examiner` now names them under `Strengthen:`. |
@@ -70,7 +70,7 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 | 12 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. Its brief lists what settled each criterion. It records its advisory findings and its verdict itself. |
 | 12 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
-| 14 | `handoff` | Run `S handoff <goal>` and print its report. Stop. |
+| 14 | `handoff` | Run `S handoff <goal>` and print its report. It removes the goal's worktrees, scratch folders, and merged unit branches. Stop. |
 | 15 | `done` | The goal was handed off. Nothing is left to do. |
 
 ## Planning (row 2)
@@ -80,7 +80,8 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 3. Find the test command in the repo's docs or build files. Read the code the goal touches.
    Workers run in fresh worktrees outside the repo, so ignored dependencies aren't there. If the tests need them,
    set `setup:` in the contract to a command that prepares a checkout, such as `npm ci` or
-   `ln -s "$MAIN/node_modules" node_modules`. `MAIN` is the repo root. What setup creates must be gitignored.
+   `ln -s "$MAIN/node_modules" node_modules`. `MAIN` is the repo root. What setup creates must be gitignored:
+   `S approve` runs setup in a fresh checkout and refuses one that fails or leaves files git would see.
 4. Fill in `.swarm/<goal>/contract.md`:
    - Make every criterion observable.
    - Write a criterion about a string's absence as a backticked `grep ...` command. `S prove` passes it when grep finds nothing.
@@ -89,7 +90,8 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 5. Fill in `.swarm/<goal>/plan.md`:
    - Give each unit a scope of product files only, plus `after` and `criteria`.
    - Give a change that two units need its own unit.
-6. Run `S lint <goal>` until it passes. If the goal holds more than one shippable outcome, or needs more than 6 units, plan the first goal and name the rest.
+6. Run `S lint <goal>` until it passes. Lint refuses more than 6 units. If the goal holds more than one shippable
+   outcome, or needs more units, plan the first goal and name the rest.
 
 ## Asking
 
@@ -107,6 +109,7 @@ Record answers through the script, never by editing files:
 | fix after a goal-level failure | `S reopen <goal> "<task>" "<scope>" "<why>"` |
 | accept a criterion without proof | `S waive <goal> <C> "<why>"` |
 | accept the whole change despite a blocking review | `S waive <goal> whole "<why>"` |
+| stop the goal for good | `S abandon <goal> "<why>"`. It keeps `swarm/<goal>` as the record, removes the worktrees, merged unit branches, and holdout, and checks out the base branch. |
 
 ## Learning (row 13)
 
