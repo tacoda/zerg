@@ -18,7 +18,8 @@ npx skills add tacoda/zerg -g         # for every project
 npx skills check                      # see whether a newer zerg is out; run `add` again to update
 ```
 
-It needs git, Node.js 18 or later, and a repo whose test suite runs from one command. If you installed it with
+It needs git, Node.js 18 or later, and a repo whose test suite runs from one command. It runs on macOS, Linux, and
+Windows; the role files use only `S` commands, never shell-specific syntax. If you installed it with
 `npx skills`, you already have Node.
 
 ## Use it
@@ -73,7 +74,9 @@ Each role records its own result through the script (`define`, `report`, `review
 ## What the code guarantees
 
 - **One writer at a time:** every state change takes `.swarm/.lock`, so parallel agents can't lose updates.
-- **Isolation:** every worker gets its own worktree and branch, and `lint` keeps their scopes from overlapping.
+- **Isolation:** every worker gets its own worktree and branch, outside the repo in `$ZERG_HOME/work/`, so your test
+  runner never collects another worker's files. `lint` keeps their scopes from overlapping. An optional `setup:`
+  command prepares each new worktree, for example `npm ci`.
 - **Fail-first tests:** tests come from the examiner and must fail before work starts. A worker's diff must stay inside its scope.
 - **Never trust a report:** `report produced` needs commits, `check` runs the tests itself, and `merge` needs a recorded pass.
   `move` can't skip a gate: by hand it only records a lost lease or a drop.

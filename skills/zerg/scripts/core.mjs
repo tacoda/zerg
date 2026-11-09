@@ -4,9 +4,11 @@
  * Nothing here touches the disk, git, or a shell, so all of it is covered by fast unit tests.
  */
 
-export const IGNORES = [".swarm/.tmp/", ".swarm/.work/", ".swarm/.lock", ".swarm/STOP"];
-// Worker and check worktrees live here; they are never a verifier's writes.
-export const NOT_TREE = [".swarm/.tmp/", ".swarm/.work/", ".swarm/.lock"];
+export const IGNORES = [".swarm/.lock", ".swarm/STOP"];
+// The lock is zerg's own file; it is never a role's write. Worktrees live outside the repo, in ZERG_HOME.
+export const NOT_TREE = [".swarm/.lock"];
+// A unit check that means "the contract's test command", resolved when it runs, so the command is stored once, verbatim.
+export const TEST_CHECK = "@test";
 export const GOAL_ID = /^G-[a-z0-9]+(-[a-z0-9]+)*$/;
 export const UNIT_ID = /^[UF]-\d+$/;
 // The only transitions a human or orchestrator may make by hand. Everything else goes through a gate.
@@ -84,6 +86,30 @@ export const clean = (value) => String(value).replace(/\|/g, "/").split(/\s+/).f
 /** @param {string} cell */
 export const splitList = (cell) => cell.split(",").map((s) => s.trim()).filter((s) => s !== "" && s !== "-");
 
+/** A scope cell as globs in git's path form: forward slashes, whatever the planner typed. @param {string} cell */
+export const scopeGlobs = (cell) => splitList(cell).map((g) => g.replaceAll("\\", "/"));
+
+/** Every file zerg reads goes through this, so a contract saved with CRLF parses like any other. */
+export const normalizeNewlines = (text) => text.replace(/\r\n?/g, "\n");
+
+/** Paths from `git status --porcelain -z`: never quoted, and a rename yields its new path only. */
+export function parsePorcelainZ(output) {
+  const items = output.split("\0");
+  const paths = [];
+  for (let i = 0; i < items.length; i++) {
+    if (!items[i]) continue;
+    paths.push(items[i].slice(3));
+    if (/[RC]/.test(items[i].slice(0, 2))) i++;
+  }
+  return paths;
+}
+
+/** A repo name as one word, so ids built from it split cleanly. */
+export const slug = (name) => name.trim().replace(/\s+/g, "-") || "repo";
+
+/** The command a unit's check runs. @param {string} check @param {string} test */
+export const resolveCheck = (check, test) => (check === TEST_CHECK ? test : check);
+
 /** @param {string} text @returns {Unit[]} */
 export function parseTable(text) {
   return lines(text).filter((l) => l.startsWith("|")).slice(2).map((line) => {
@@ -159,7 +185,7 @@ export const grepHitFiles = (output) =>
 
 /** Every file a grep criterion hits must sit in the scope of a unit that serves that criterion. */
 export function grepProblems(cid, files, units) {
-  const globs = units.filter((u) => splitList(u.criteria).includes(cid)).flatMap((u) => splitList(u.scope));
+  const globs = units.filter((u) => splitList(u.criteria).includes(cid)).flatMap((u) => scopeGlobs(u.scope));
   return files.filter((f) => !globs.some((g) => fnmatch(f, g)))
     .map((f) => `${cid}: its grep hits ${f}, which no unit serving ${cid} has in scope`);
 }
@@ -270,7 +296,7 @@ export function endWord(state) {
 /** A grep criterion as argv, or null when it isn't one plain grep command. */
 export function grepArgv(command) {
   const argv = shellWords(command);
-  return argv && argv[0] === "grep" ? argv : null;
+  return argv && argv[0] === "grep" ? ["grep", "-H", ...argv.slice(1)] : null;
 }
 
 /** Changed files that the examiner wrote: no unit may touch them, whatever its scope says. */
@@ -322,7 +348,7 @@ export function rowProblems(unit, ids, crits) {
   const uid = unit.unit;
   return [
     ...(UNIT_ID.test(uid) ? [] : [`${uid}: unit id must look like U-001`]),
-    ...(splitList(unit.scope).length ? [] : [`${uid}: empty scope`]),
+    ...(scopeGlobs(unit.scope).length ? [] : [`${uid}: empty scope`]),
     ...splitList(unit.after).filter((d) => !ids.includes(d)).map((d) => `${uid}: unknown after ${d}`),
     ...splitList(unit.criteria).filter((c) => !crits.includes(c)).map((c) => `${uid}: unknown criterion ${c}`),
   ];
@@ -337,7 +363,7 @@ export function planProblems(units, crits) {
   const covered = new Set(units.flatMap((u) => splitList(u.criteria)));
   problems.push(...crits.filter((c) => !covered.has(c)).map((c) => `plan: criterion ${c} has no unit`));
   units.forEach((a, i) => units.slice(i + 1).forEach((b) => {
-    if (globsOverlap(splitList(a.scope), splitList(b.scope))) problems.push(`plan: scopes overlap: ${a.unit} and ${b.unit}`);
+    if (globsOverlap(scopeGlobs(a.scope), scopeGlobs(b.scope))) problems.push(`plan: scopes overlap: ${a.unit} and ${b.unit}`);
   }));
   try {
     mergeOrder(units.filter((u) => splitList(u.after).every((d) => ids.includes(d))));
@@ -348,12 +374,25 @@ export function planProblems(units, crits) {
 }
 
 /** @param {string} text @param {Unit[]} units */
+/** max_parallel must be 1 or more and token_budget a whole number, when they're set at all. */
+const wholeNumberAtLeast = (value, min) => /^\d+$/.test(value) && parseInt(value, 10) >= min;
+
+export function numberProblems(header) {
+  const problems = [];
+  const parallel = header.max_parallel;
+  if (parallel && !wholeNumberAtLeast(parallel, 1)) problems.push("contract: max_parallel must be a whole number of 1 or more");
+  const budget = header.token_budget;
+  if (budget && !wholeNumberAtLeast(budget, 0)) problems.push("contract: token_budget must be a whole number");
+  return problems;
+}
+
 export function lintProblems(text, units) {
   const header = parseHeader(text);
   const problems = SECTIONS.filter((s) => !section(text, s).trim()).map((s) => `contract: empty section ## ${s}`);
   problems.push(...["base", "test"].filter((k) => !header[k]).map((k) => `contract: missing header ${k}`));
   problems.push(...Object.entries(header).filter(([, v]) => v.startsWith("<") && v.endsWith(">"))
     .map(([k]) => `contract: header ${k} is still a placeholder`));
+  problems.push(...numberProblems(header));
   const crits = criteria(text);
   if (!crits.length) problems.push("contract: no criteria like '- C1: ...'");
   return [...problems, ...planProblems(units, crits)];

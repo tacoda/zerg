@@ -2,6 +2,7 @@
 
 base: <filled by swarm.mjs new>
 test: <command that runs the full suite>
+setup:
 max_parallel: 3
 token_budget:
 

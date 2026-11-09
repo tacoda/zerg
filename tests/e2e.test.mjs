@@ -31,7 +31,9 @@ function step(name, command, pattern) {
 }
 
 /** A simulated worker: change files inside the worktree `lease` made, then commit. */
-const work = (unit, change) => sh(`cd .swarm/.work/G-1/${unit} && ${change} && git add -A && git commit -qm ${unit}`);
+/** A unit's worktree, read from its brief: it lives outside the repo, in ZERG_HOME. */
+const tree = (unit) => /WORKTREE: (.+)/.exec(sh(`$S brief G-1 worker ${unit}`))?.[1] ?? "";
+const work = (unit, change) => sh(`cd "${tree(unit)}" && ${change} && git add -A && git commit -qm ${unit}`);
 
 const write = (file, text) => {
   fs.mkdirSync(path.dirname(path.join(T, file)), { recursive: true });
@@ -45,6 +47,7 @@ test("set up a repo with a green suite", () => {
   assert.match(sh("$S new G-1"), /no commits/);
   write("src/calc.py", "def add(a, b):\n    return a + b\n");
   write("tests/test_calc.py", pyTest("add", "calc import add", "self.assertEqual(add(1, 2), 3)"));
+  write(".gitignore", ".deps/\n");
   sh("git add -A && git commit -qm init");
 });
 step("a detached HEAD is refused", "git checkout -q --detach && $S new G-1; git checkout -q main", /HEAD is detached/);
@@ -65,6 +68,12 @@ test("a grep criterion with shell operators is refused", () => {
   assert.match(sh("$S lint G-1"), /C3: a grep criterion must be one plain grep command/);
   assert.ok(!fs.existsSync(path.join(T, "pwned")), "lint must never run the criterion through a shell");
   edit(".swarm/G-1/contract.md", "\n- C3: `grep -rn x src; touch pwned`", "");
+});
+test("lint reads a contract saved with CRLF", () => {
+  const file = path.join(T, ".swarm", "G-1", "contract.md");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("\n", "\r\n"));
+  assert.match(sh("$S lint G-1"), /plan ok/);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n"));
 });
 step("lint passes", "$S lint G-1", /plan ok/);
 step("summary for approval", "$S summary G-1", /U-002 {2}add mul/);
@@ -104,9 +113,25 @@ step("next says amend", "$S next G-1", /row 4 amend: U-001/);
 step("amend", "$S amend G-1 U-001 keep add unchanged", /task amended/);
 step("baseline: all checks fail first", "$S baseline G-1", /"passing_before_work": \[\]/);
 step("only U-001 is ready", "$S lease G-1 U-002", /not ready/);
-step("lease makes a worktree", "$S lease G-1 U-001", /worktree .*\/\.swarm\/\.work\/G-1\/U-001/);
+test("setup runs in every new worktree, and a failing setup leases nothing", () => {
+  edit(".swarm/G-1/contract.md", "setup:\n", "setup: exit 3\n");
+  sh("git commit -qam 'test: failing setup'");
+  assert.match(sh("$S lease G-1 U-001"), /setup failed in U-001's worktree, so nothing was leased/);
+  assert.match(sh("grep -c '| U-001 | leased |' .swarm/G-1/log.md || true"), /^0$/m);
+  edit(".swarm/G-1/contract.md", "setup: exit 3\n", "setup: mkdir -p .deps && touch .deps/ready && test -n \"$MAIN\"\n");
+  sh("git commit -qam 'test: working setup'");
+});
+test("lease makes a worktree outside the repo", () => {
+  const output = sh("$S lease G-1 U-001");
+  assert.match(output, /leased U-001: worktree /);
+  assert.ok(tree("U-001").startsWith(HOME), tree("U-001"));
+  assert.ok(fs.existsSync(path.join(tree("U-001"), ".deps", "ready")), "setup ran in the worktree");
+});
 step("a live lease makes next wait", "$S next G-1", /row 7 wait: U-001 still leased/);
-step("a lease whose worktree is gone is an orphan", "git worktree remove --force .swarm/.work/G-1/U-001 && $S next G-1", /row 7 orphans: U-001/);
+test("a lease whose worktree is gone is an orphan", () => {
+  sh(`git worktree remove --force "${tree("U-001")}"`);
+  assert.match(sh("$S next G-1"), /row 7 orphans: U-001/);
+});
 step("the orphan goes back to planned", "$S move G-1 U-001 planned 'lease lost'", /leased -> planned/);
 step("and is leased again", "$S lease G-1 U-001", /worktree/);
 test("answer refuses a unit that isn't stuck, and leaves the contract alone", () => {
@@ -115,6 +140,8 @@ test("answer refuses a unit that isn't stuck, and leaves the contract alone", ()
 });
 step("rescope works on a planned unit", "$S rescope G-1 U-002 src/mul.py 'examiner finding needs it'", /U-002: scope src\/mul\.py/);
 step("brief names the role file", "$S brief G-1 worker U-001", /references\/worker\.md/);
+step("brief quotes the script path", "$S brief G-1 worker U-001", /S: node ".*swarm\.mjs"/);
+step("a verifier's brief has its own temp folder", "$S brief G-1 verifier U-001", /TMP: .*zerg-verify-/);
 
 test("a path-traversal unit id is refused and nothing is deleted", () => {
   assert.match(sh("$S report G-1 ../../.. gave_up x"), /unit id must look like U-001/);
@@ -128,10 +155,10 @@ step("a bad goal id is refused", "$S next ../x", /goal id must look like/);
 step("a report from a worktree with no commits keeps the worktree",
   "$S report G-1 U-001 produced nothing; true", /no commits/);
 test("worker U-001", () => work("U-001", "printf '\\ndef sub(a, b):\\n    return a - b\\n' >> src/calc.py"));
-step("worker reports from inside its worktree", "cd .swarm/.work/G-1/U-001 && $S report G-1 U-001 produced 'sub added'", /leased -> produced/);
+test("worker reports from inside its worktree", () => assert.match(sh(`cd "${tree("U-001")}" && $S report G-1 U-001 produced 'sub added'`), /leased -> produced/));
 step("a stale second report changes nothing", "$S report G-1 U-001 produced again", /is produced, not leased/);
 step("move can't skip the gates", "$S move G-1 U-001 merged skip", /move only handles/);
-step("worktree removed after report", "ls .swarm/.work/G-1 | wc -l", /^\s*0$/m);
+test("worktree removed after report", () => assert.ok(!fs.existsSync(tree("U-001"))));
 step("next says check", "$S next G-1", /row 6 check: U-001/);
 step("check passes", "$S check G-1 U-001", /"ok": true/);
 step("merge refused before review", "$S merge G-1 U-001", /passed by a verifier/);
@@ -234,7 +261,9 @@ test("write learn.md", () => write(".swarm/G-1/learn.md",
 step("learn routes both lanes", "$S stage G-1 learned", /zerg -> .*inbox\.md/);
 step("the project lesson is committed", "git show swarm/G-1:.swarm/LEARNINGS.md", /demo project rule/);
 step("the inbox lists the zerg lesson", "$S inbox", /\/G-1\/P1/);
+step("no user rules yet", "$S rules", /no user rules yet/);
 step("accept into rules", `$S accept repo/G-1/P1 keep`, /rules\.md/);
+step("rules prints them for every role", "$S rules", /demo zerg rule/);
 step("handoff shows the waiver", "$S handoff G-1", /C2: WAIVED: covered by the integration suite[\s\S]*checked out main/);
 step("no leftover worktrees", "git worktree list | wc -l", /^\s*1$/m);
 step("state lives on the branch only", "$S status G-1", /check it out first/);

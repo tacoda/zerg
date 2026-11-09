@@ -68,8 +68,11 @@ Get the handoff text with `S brief <goal> <role> [unit]`. Then:
 ## Planning (row 2)
 
 1. Run `S new <goal>`. The goal id is `G-` plus a short kebab slug.
-2. Run `S home`, then read the user `rules.md` it names and `.swarm/LEARNINGS.md`, if they exist. Plan with both.
+2. Run `S rules` and read `.swarm/LEARNINGS.md`, if it exists. Plan with both.
 3. Find the test command in the repo's docs or build files. Read the code the goal touches.
+   Workers run in fresh worktrees outside the repo, so ignored dependencies aren't there. If the tests need them,
+   set `setup:` in the contract to a command that prepares a checkout, such as `npm ci` or
+   `ln -s "$MAIN/node_modules" node_modules`. `MAIN` is the repo root. What setup creates must be gitignored.
 4. Fill in `.swarm/<goal>/contract.md`:
    - Make every criterion observable.
    - Write a criterion about a string's absence as a backticked `grep ...` command.

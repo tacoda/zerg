@@ -27,7 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
-  blockers, orphanedLeases, stuckDetail,
+  blockers, orphanedLeases, stuckDetail, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -68,6 +68,7 @@ const USAGE = `zerg control plane
 
 User layer, in $ZERG_HOME (default ~/.zerg), outside the skill so it survives updates:
   home                                paths and the bounds in effect
+  rules                               print the user rules every role reads
   inbox                               pending zerg proposals routed by \`stage learned\`
   accept <id> [note]                  move a proposal into rules.md, which every goal reads
   dismiss <id> [reason]               archive a proposal without using it
@@ -99,7 +100,7 @@ function exit(code) {
 
 const say = (/** @type {string} */ text) => console.log(text);
 const exists = (/** @type {string} */ p) => fs.existsSync(p);
-const read = (/** @type {string} */ p) => fs.readFileSync(p, "utf8");
+const read = (/** @type {string} */ p) => normalizeNewlines(fs.readFileSync(p, "utf8"));
 /** Writes through a temp file and a rename, so a lock-free reader never sees half a file. */
 function write(/** @type {string} */ p, /** @type {string} */ text) {
   const tmp = `${p}.${process.pid}.tmp`;
@@ -128,9 +129,10 @@ const out = (/** @type {string[]} */ args, cwd = undefined) => git(args, { cwd }
 let cachedRoot = "";
 function root() {
   if (cachedRoot) return cachedRoot;
-  const proc = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" });
+  // The first entry of `worktree list` is the main worktree, which is right in linked worktrees and submodules alike.
+  const proc = spawnSync("git", ["worktree", "list", "--porcelain"], { encoding: "utf8" });
   if (proc.status !== 0) fail("not inside a git repository");
-  cachedRoot = path.dirname(proc.stdout.trim());
+  cachedRoot = partition(lines(proc.stdout)[0] ?? "", " ")[2];
   return cachedRoot;
 }
 
@@ -217,13 +219,16 @@ function require(goal, event) {
   if (!goalEvents(entries(goal)).has(event)) fail(`${goal}: \`${event}\` hasn't happened yet`);
 }
 
-/** Outside the repo, so no test runner collects it and no worker or verifier working in the repo can read it. */
-function holdoutDir(goal) {
-  const key = `${path.basename(root())}-${createHash("sha1").update(root()).digest("hex").slice(0, 8)}`;
-  const dir = within(path.join(zergHome(), "holdout"), key, goal);
-  if (!path.relative(root(), realish(dir)).startsWith("..")) fail(`ZERG_HOME (${zergHome()}) is inside this repo; set it outside, or the holdout isn't hidden`);
+/** A folder for this repo in the user layer, which must sit outside the repo so no test runner collects it. */
+function userDir(kind, ...parts) {
+  const key = `${slug(path.basename(root()))}-${createHash("sha1").update(root()).digest("hex").slice(0, 8)}`;
+  const dir = within(path.join(zergHome(), kind), key, ...parts);
+  if (!path.relative(root(), realish(dir)).startsWith("..")) fail(`ZERG_HOME (${zergHome()}) is inside this repo; set it outside the repo`);
   return dir;
 }
+
+/** Outside the repo, so no test runner collects it and no worker or verifier working in the repo can read it. */
+const holdoutDir = (goal) => userDir("holdout", goal);
 
 function holdoutCommand(goal) {
   const file = path.join(holdoutDir(goal), "command");
@@ -238,8 +243,8 @@ function budget(goal) {
 }
 
 function dirtyPaths() {
-  return lines(git(["status", "--porcelain", "--untracked-files=all"]).stdout)
-    .filter((l) => l.trim()).map((l) => l.slice(3)).filter((p) => !NOT_TREE.some((n) => p.startsWith(n)));
+  return parsePorcelainZ(git(["status", "--porcelain", "-z", "--untracked-files=all"]).stdout)
+    .filter((p) => !NOT_TREE.some((n) => p.startsWith(n)));
 }
 
 
@@ -317,7 +322,7 @@ function withStateLock(fn) {
   }
 }
 
-const worktreePath = (goal, uid) => within(path.join(root(), ".swarm", ".work"), goal, uid);
+const worktreePath = (goal, uid) => userDir("work", goal, uid);
 
 /** @returns {Record<string, string>[]} */
 function worktrees() {
@@ -331,6 +336,14 @@ function removeWorktreeFor(ref) {
   }
 }
 
+/** Runs the contract's `setup` in a new worktree, so ignored dependencies (node_modules, a venv) are there. */
+function runSetup(goal, dir) {
+  const setup = parseHeader(contractText(goal)).setup;
+  if (!setup) return [true, ""];
+  const proc = spawnSync(setup, { shell: true, cwd: dir, encoding: "utf8", env: { ...process.env, MAIN: root() } });
+  return [proc.status === 0, ((proc.stdout ?? "") + (proc.stderr ?? "")).slice(-3000)];
+}
+
 function makeWorktree(goal, uid) {
   const ref = `unit/${goal}/${uid}`;
   const dir = worktreePath(goal, uid);
@@ -338,6 +351,11 @@ function makeWorktree(goal, uid) {
   rmrf(dir);
   fs.mkdirSync(path.dirname(dir), { recursive: true });
   git(["worktree", "add", "-q", "-B", ref, dir, `swarm/${goal}`]);
+  const [ok, output] = runSetup(goal, dir);
+  if (!ok) {
+    git(["worktree", "remove", "--force", dir], { check: false });
+    fail(`setup failed in ${uid}'s worktree, so nothing was leased:\n${output}`);
+  }
   return dir;
 }
 
@@ -391,6 +409,11 @@ function cmdHome() {
     say(`${(name + ":").padEnd(8)}${file}${exists(file) ? "" : "  (none yet)"}`);
   }
   say("bounds: " + Object.entries(userBounds()).map(([k, v]) => `${k}=${v}`).join(", "));
+}
+
+function cmdRules() {
+  const file = path.join(zergHome(), "rules.md");
+  say(exists(file) ? read(file) : "no user rules yet");
 }
 
 function cmdInbox() {
@@ -491,7 +514,7 @@ function cmdApprove(goal, autonomy = "ask") {
 // --- define and baseline ---
 
 function foreignDefineChanges(goal, units) {
-  const scopes = units.flatMap((u) => splitList(u.scope));
+  const scopes = units.flatMap((u) => scopeGlobs(u.scope));
   const stateFiles = ["contract.md", "plan.md", "log.md"].map((n) => `.swarm/${goal}/${n}`);
   return dirtyPaths().filter((p) => stateFiles.includes(p) || scopes.some((g) => fnmatch(p, g)));
 }
@@ -542,7 +565,7 @@ function cmdDefine(goal, ...pairs) {
 }
 
 function baselineUnit(goal, unit, earlier) {
-  if (!run(unit.check, root())[0]) return null;
+  if (!run(checkCommand(goal, unit), root())[0]) return null;
   if (earlier.includes(unit.unit)) {
     updateUnit(goal, unit.unit, { event: "stuck", note: "tests pass before any change, twice",
       fields: { state: "stuck", note: "tests pass before any change; the examiner could not strengthen them" } });
@@ -624,10 +647,14 @@ function cmdLease(goal, ...uids) {
   const ready = readyUnits(loadUnits(goal), parseInt(parseHeader(contractText(goal)).max_parallel, 10) || 3);
   const notReady = uids.filter((u) => !ready.includes(u));
   if (notReady.length) fail(`not ready to lease: ${notReady.join(", ")} (ready: ${ready.join(", ") || "none"})`);
+  const dirs = uids.map((uid) => makeWorktree(goal, uid));
   uids.forEach((uid) => updateUnit(goal, uid, { event: "leased", fields: { state: "leased" } }));
   save(goal, `lease ${uids.join(" ")}`);
-  uids.forEach((uid) => say(`leased ${uid}: worktree ${makeWorktree(goal, uid)}`));
+  uids.forEach((uid, i) => say(`leased ${uid}: worktree ${dirs[i]}`));
 }
+
+/** A unit's check as a runnable command; `@test` means the contract's test command. */
+const checkCommand = (goal, unit) => resolveCheck(unit.check, parseHeader(contractText(goal)).test);
 
 function commitsAhead(goal, uid) {
   const ref = `unit/${goal}/${uid}`;
@@ -644,13 +671,15 @@ function cmdProduced(goal, uid, summary = "") {
   moveUnit(goal, uid, "produced", summary);
 }
 
-function runInWorktree(ref, command) {
-  const tree = within(path.join(root(), ".swarm", ".tmp"), ref.replaceAll("/", "-"));
+function runInWorktree(goal, ref, command) {
+  const tree = userDir("work", goal, `check-${ref.replaceAll("/", "-")}`);
   git(["worktree", "remove", "--force", tree], { check: false });
   rmrf(tree);
+  fs.mkdirSync(path.dirname(tree), { recursive: true });
   git(["worktree", "add", "-q", "--detach", tree, ref]);
   try {
-    return run(command, tree);
+    const setup = runSetup(goal, tree);
+    return setup[0] ? run(command, tree) : [false, `setup failed:\n${setup[1]}`];
   } finally {
     git(["worktree", "remove", "--force", tree], { check: false });
   }
@@ -660,10 +689,10 @@ function cmdCheck(goal, uid) {
   const unit = getUnit(loadUnits(goal), uid);
   if (unit.state !== "produced") fail(`${uid} is ${unit.state}, not produced`);
   const ref = `unit/${goal}/${uid}`;
-  const changed = lines(out(["diff", "--name-only", `swarm/${goal}...${ref}`]));
-  const violations = scopeViolations(changed, splitList(unit.scope));
+  const changed = git(["diff", "--name-only", "-z", `swarm/${goal}...${ref}`]).stdout.split("\0").filter(Boolean);
+  const violations = scopeViolations(changed, scopeGlobs(unit.scope));
   const touched = testViolations(changed, examinerFiles(goal));
-  const [ok, output] = runInWorktree(ref, unit.check);
+  const [ok, output] = runInWorktree(goal, ref, checkCommand(goal, unit));
   const problem = !changed.length ? "no changes" : touched.length ? `changes the examiner's tests: ${touched.join(", ")}`
     : violations.length ? `outside scope: ${violations.join(", ")}` : ok ? null : `check fails: ${lastLine(output)}`;
   say(json({ ok: problem === null, changed, scope_violations: violations, check: ok ? "pass" : "fail", output: ok ? "" : output }));
@@ -731,8 +760,9 @@ function cmdReview(goal, subject, verdict, ...reason) {
 function cmdBrief(goal, role, uid = "-") {
   if (!ROLES.includes(role)) fail(`role is one of ${ROLES.join(", ")}`);
   const text = [`You are the zerg ${role}. Read ${path.join(SKILL_DIR, "references", role + ".md")} and follow it exactly.`,
-    `Goal: ${goal}`, `Unit: ${uid}`, `MAIN: ${root()}`, `S: node ${SCRIPT}`];
+    `Goal: ${goal}`, `Unit: ${uid}`, `MAIN: ${root()}`, `S: node "${SCRIPT}"`];
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
+  if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`);
   if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
   say(text.join("\n"));
 }
@@ -770,7 +800,7 @@ function cmdMerge(goal, uid) {
   // Other units' tests are still red by design (fail-first), so the full suite waits for integrate.
   // Per merge: this unit's check and every merged unit's check must pass.
   const guarded = loadUnits(goal).filter((u) => u.state === "merged" || u.unit === uid);
-  const broken = guarded.filter((u) => !run(u.check, root())[0]).map((u) => u.unit);
+  const broken = guarded.filter((u) => !run(checkCommand(goal, u), root())[0]).map((u) => u.unit);
   if (broken.length && merged) {
     moveUnit(goal, uid, "stuck", `merged before a crash, and now these checks fail: ${broken.join(", ")}`);
     exit(1);
@@ -818,7 +848,7 @@ function cmdRescope(goal, uid, scope, ...reason) {
   const units = loadUnits(goal);
   const unit = getUnit(units, uid);
   if (!["stuck", "planned"].includes(unit.state)) fail(`${uid} is ${unit.state}; only a stuck or planned unit is rescoped, after a human decides`);
-  const clash = units.filter((u) => u.unit !== uid && !CLOSED.includes(u.state) && globsOverlap(splitList(scope), splitList(u.scope)))
+  const clash = units.filter((u) => u.unit !== uid && !CLOSED.includes(u.state) && globsOverlap(scopeGlobs(scope), scopeGlobs(u.scope)))
     .map((u) => u.unit);
   if (clash.length) fail(`new scope overlaps open units: ${clash.join(", ")}`);
   const text = reason.join(" ") || "human decision";
@@ -838,7 +868,7 @@ function addFixUnit(goal, task, scope, event) {
   if (open.length) fail(`units still open: ${open.join(", ")}; a fix unit comes after them`);
   const id = `F-${units.filter((u) => u.unit.startsWith("F-")).length + 1}`;
   /** @type {Unit} */
-  const fix = { unit: id, task, scope, after: "-", criteria: "-", check: parseHeader(contractText(goal)).test,
+  const fix = { unit: id, task, scope, after: "-", criteria: "-", check: TEST_CHECK,
     state: "planned", revisions: "0", note: "" };
   saveUnits(goal, [...units, fix]);
   log(goal, id, event, task);
@@ -926,7 +956,7 @@ function routeLearnings(goal) {
     routed.push("project -> .swarm/LEARNINGS.md");
   }
   if (lanes.zerg) {
-    appendBlock(inboxPath(), `${path.basename(root())} ${when}`, lanes.zerg);
+    appendBlock(inboxPath(), `${slug(path.basename(root()))} ${when}`, lanes.zerg);
     routed.push(`zerg -> ${inboxPath()}`);
   }
   return routed;
@@ -1008,7 +1038,7 @@ function cmdHandoff(goal) {
 
 const LOCK_FREE = new Set(["peek", "status", "summary", "brief", "lint"]);
 /** @type {Record<string, (...args: string[]) => void>} */
-const USER_COMMANDS = { home: cmdHome, inbox: cmdInbox, accept: cmdAccept, dismiss: cmdDismiss, config: cmdConfig };
+const USER_COMMANDS = { home: cmdHome, rules: cmdRules, inbox: cmdInbox, accept: cmdAccept, dismiss: cmdDismiss, config: cmdConfig };
 /** @type {Record<string, (...args: string[]) => void>} */
 const COMMANDS = {
   new: cmdNew, lint: cmdLint, approve: cmdApprove, define: cmdDefine, baseline: cmdBaseline,

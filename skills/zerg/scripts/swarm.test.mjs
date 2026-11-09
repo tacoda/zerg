@@ -273,8 +273,8 @@ describe("batch 1 guards", () => {
   });
 
   test("grep criteria parse to argv, or not at all", () => {
-    assert.deepEqual(swarm.grepArgv(`grep -rn "a b" src`), ["grep", "-rn", "a b", "src"]);
-    assert.deepEqual(swarm.grepArgv("grep -rn 'x;y' src"), ["grep", "-rn", "x;y", "src"]);
+    assert.deepEqual(swarm.grepArgv(`grep -rn "a b" src`), ["grep", "-H", "-rn", "a b", "src"], "-H names the file even for one");
+    assert.deepEqual(swarm.grepArgv("grep -rn 'x;y' src"), ["grep", "-H", "-rn", "x;y", "src"]);
     for (const bad of ["grep x src; touch p", "grep x src | sh", "grep $(id) src", "grep `id` src", "grep x > f", "rm -rf x", "grep 'open"]) {
       assert.equal(swarm.grepArgv(bad), null, bad);
     }
@@ -344,5 +344,40 @@ describe("batch 2 recovery", () => {
 
   test("lease_minutes is a bound users can set", () => {
     assert.equal(swarm.BOUNDS.lease_minutes, 60);
+  });
+});
+
+describe("batch 3 real repos", () => {
+  test("a CRLF contract parses like an LF one", () => {
+    const crlf = swarm.normalizeNewlines(CONTRACT.replaceAll("\n", "\r\n"));
+    assert.deepEqual(swarm.criteria(crlf), ["C1", "C2"]);
+    assert.equal(swarm.lintProblems(crlf, [unit("U-001", "a.py", { criteria: "C1, C2" })]).length, 0);
+  });
+
+  test("git -z output is read unquoted, and a rename yields its new path", () => {
+    assert.deepEqual(swarm.parsePorcelainZ(" M src/café.py\0R  new name.py\0old.py\0?? x y\0"), ["src/café.py", "new name.py", "x y"]);
+  });
+
+  test("scopes are compared in git's forward-slash form", () => {
+    assert.deepEqual(swarm.scopeGlobs("src\\a.py, lib\\*.js"), ["src/a.py", "lib/*.js"]);
+    assert.deepEqual(swarm.scopeViolations(["src/a.py"], swarm.scopeGlobs("src\\a.py")), []);
+  });
+
+  test("a repo name with spaces becomes one word in inbox ids", () => {
+    assert.equal(swarm.slug("my repo "), "my-repo");
+    const inbox = `# inbox\n\n## ${swarm.slug("my repo")} G-a (2026-11-08)\n\n### P1. x (add)\ny\n`;
+    assert.deepEqual(swarm.parseInbox(inbox).map((p) => p.id), ["my-repo/G-a/P1"]);
+  });
+
+  test("@test runs the contract's test command, verbatim", () => {
+    assert.equal(swarm.resolveCheck("@test", "npm test | tee out"), "npm test | tee out");
+    assert.equal(swarm.resolveCheck("npm run unit", "npm test"), "npm run unit");
+  });
+
+  test("numeric headers are validated", () => {
+    assert.deepEqual(swarm.numberProblems({ max_parallel: "3", token_budget: "" }), []);
+    assert.equal(swarm.numberProblems({ max_parallel: "-1" }).length, 1);
+    assert.equal(swarm.numberProblems({ max_parallel: "0" }).length, 1);
+    assert.equal(swarm.numberProblems({ token_budget: "lots" }).length, 1);
   });
 });

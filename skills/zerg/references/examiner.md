@@ -5,7 +5,7 @@ Your brief gives you `Goal`, `MAIN`, `HOLDOUT`, and `S`, and sometimes `Strength
 `HOLDOUT` is a folder outside the repo. You are the only role that knows where it is; never write it into the repo.
 
 1. Read `.swarm/<goal>/contract.md` and `.swarm/<goal>/plan.md`. Then read `.swarm/LEARNINGS.md` and the user
-   rules (`cat "${ZERG_HOME:-$HOME/.zerg}/rules.md"`), if they exist. Read the code each unit's scope touches.
+   rules (`S rules`), if they exist. Read the code each unit's scope touches.
 2. For each unit without a `check`, or each unit named in `Strengthen`, write tests for the criteria the unit serves.
    - Put the tests where the project keeps its tests, in its style, so they stay as regression tests after the merge.
    - Each test must fail on the current code. Run it, and confirm it fails because the behavior is missing, not because of an import or setup error.
