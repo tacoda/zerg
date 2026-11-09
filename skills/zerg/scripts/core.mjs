@@ -412,6 +412,12 @@ export function strengthenUnits(rows, units) {
 }
 
 /** max_parallel must be 1 or more and token_budget a whole number, when they're set at all. */
+/** A header key written twice: the last value would win silently, so lint names it instead. */
+export function duplicateHeaders(text) {
+  const keys = lines(partition(text, "\n## ")[0]).filter((l) => /^[a-z_]+:/.test(l)).map((l) => partition(l, ":")[0]);
+  return [...new Set(keys.filter((k, i) => keys.indexOf(k) !== i))].map((k) => `contract: header ${k} is set more than once`);
+}
+
 const wholeNumberAtLeast = (value, min) => /^\d+$/.test(value) && parseInt(value, 10) >= min;
 
 export function numberProblems(header) {
@@ -429,7 +435,7 @@ export function lintProblems(text, units) {
   problems.push(...["base", "test"].filter((k) => !header[k]).map((k) => `contract: missing header ${k}`));
   problems.push(...Object.entries(header).filter(([, v]) => v.startsWith("<") && v.endsWith(">"))
     .map(([k]) => `contract: header ${k} is still a placeholder`));
-  problems.push(...numberProblems(header));
+  problems.push(...numberProblems(header), ...duplicateHeaders(text));
   const crits = criteria(text);
   if (!crits.length) problems.push("contract: no criteria like '- C1: ...'");
   return [...problems, ...planProblems(units, crits)];

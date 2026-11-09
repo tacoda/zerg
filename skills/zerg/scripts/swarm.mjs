@@ -310,9 +310,11 @@ function takeLock(lock) {
 function withStateLock(fn) {
   const lock = path.join(root(), ".swarm", ".lock");
   fs.mkdirSync(path.dirname(lock), { recursive: true });
-  const deadline = Date.now() + 900_000;
+  // ZERG_LOCK_TIMEOUT_S shortens the wait, which lets a test prove a live owner's lock is never taken.
+  const seconds = parseInt(process.env.ZERG_LOCK_TIMEOUT_S ?? "", 10) || 900;
+  const deadline = Date.now() + seconds * 1000;
   while (!takeLock(lock)) {
-    if (Date.now() > deadline) fail("another zerg command has held .swarm/.lock for 15 minutes");
+    if (Date.now() > deadline) fail(`another zerg command (${exists(lock) ? read(lock).trim() : "gone"}) held .swarm/.lock for ${seconds} seconds`);
     sleep(200);
   }
   try {

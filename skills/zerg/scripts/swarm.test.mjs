@@ -404,3 +404,19 @@ describe("batch 4 docs made checkable", () => {
     assert.deepEqual(swarm.strengthenUnits([...rows, { subject: "G", event: "baseline", note: "" }], units), []);
   });
 });
+
+describe("batch 5 rows and headers", () => {
+  test("rows 1, 5, and 14 come when they should", () => {
+    assert.deepEqual(swarm.derive(state({ bound: "iteration cap: 45 passes" })).slice(0, 2), [1, "stop"]);
+    assert.deepEqual(swarm.derive(state({ events: new Set(["approved", "defined"]) })).slice(0, 2), [5, "baseline"]);
+    const units = [unit("U-001", "a", { state: "merged" })];
+    const events = new Set(["approved", "defined", "baseline", "integrated", "whole-review", "learned"]);
+    assert.deepEqual(swarm.derive(state({ units, events })).slice(0, 2), [14, "handoff"]);
+  });
+
+  test("a header key set twice is a lint problem", () => {
+    const twice = CONTRACT.replace("max_parallel: 2", "max_parallel: 2\nmax_parallel: 4");
+    assert.deepEqual(swarm.duplicateHeaders(twice), ["contract: header max_parallel is set more than once"]);
+    assert.deepEqual(swarm.duplicateHeaders(CONTRACT), []);
+  });
+});
