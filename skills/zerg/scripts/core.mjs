@@ -232,6 +232,35 @@ export function splitLanes(text) {
   return lanes;
 }
 
+const PROPOSAL = /^### P(\d+)\. .+ \((add|change|remove)\)$/;
+
+/** One proposal's problems: a heading out of form, no evidence, or evidence that isn't in log.md. */
+function proposalProblems(lane, item, logLines) {
+  const [heading, ...rest] = lines(item.trim());
+  const match = PROPOSAL.exec(heading);
+  if (!match) return [`## ${lane}: "${heading}" must look like "### P1. <rule> (add|change|remove)"`];
+  const evidence = rest.map((l) => l.trim()).filter((l) => parseLogLine(l));
+  if (!evidence.length) return [`P${match[1]}: quote at least one log.md line as its evidence`];
+  return evidence.filter((l) => !logLines.has(l)).map((l) => `P${match[1]}: this evidence isn't in log.md: ${l}`);
+}
+
+/** learn.md's problems, so `accept` and `dismiss` can find each proposal and its evidence is real.
+ * @param {Record<string, string>} lanes from splitLanes @param {Set<string>} logLines log.md, one trimmed line each */
+export function learnProblems(lanes, logLines) {
+  const problems = [];
+  const numbers = [];
+  for (const [lane, body] of Object.entries(lanes).filter(([, b]) => b)) {
+    const [lead, ...items] = body.split(/^(?=### )/m);
+    if (!lead.startsWith("### ")) problems.push(`## ${lane}: text before its first "### P1." proposal; write none if it has none`);
+    for (const item of lead.startsWith("### ") ? [lead, ...items] : items) {
+      problems.push(...proposalProblems(lane, item, logLines));
+      numbers.push(/^### P(\d+)\./.exec(item)?.[1]);
+    }
+  }
+  const twice = [...new Set(numbers.filter((n, i) => n && numbers.indexOf(n) !== i))];
+  return [...problems, ...twice.map((n) => `P${n} is used twice; number proposals once across both sections`)];
+}
+
 /** Pending zerg proposals; id = '<source first word>/<goal>/<Pn>'. @param {string} text */
 export function parseInbox(text) {
   const proposals = [];
@@ -516,6 +545,25 @@ export function goalEvents(entries) {
   return events;
 }
 
+/** Each settled criterion and the entry that settled it: a proof since the last reopen, or a waiver at any time.
+ * A fix unit changes the code, so older proofs don't count. @param {Entry[]} rows @returns {Map<string, Entry>} */
+export function settlements(rows) {
+  const since = rows.map((e) => e.event).lastIndexOf("reopened") + 1;
+  const proofs = rows.slice(since).filter((e) => e.event === "proof");
+  return new Map([...rows.filter((e) => e.event === "waived"), ...proofs].map((e) => [e.subject, e]));
+}
+
+/** @param {Entry[]} rows */
+export const settledCriteria = (rows) => new Set(settlements(rows).keys());
+
+const NO_OP_STEP = /^(true|:|exit( 0)?|echo\b.*|printf\b.*)$/;
+
+/** A command that passes whatever the code does, such as `true` or `echo ok`, proves nothing. @param {string} command */
+export const isNoOp = (command) => command.split(/&&|\|\||;|\|/).map((p) => p.trim()).filter(Boolean).every((p) => NO_OP_STEP.test(p));
+
+/** A whole-review finding names where it is: `file:line: text`. @param {string} text */
+export const isFinding = (text) => /^[^\s:]+:\d+: \S/.test(text);
+
 /** @param {{event: string, note: string}[]} entries */
 export const tokenTotal = (entries) =>
   entries.filter((e) => e.event === "tokens").reduce((sum, e) => sum + parseInt(e.note.split(/\s+/).pop() ?? "0", 10), 0);
@@ -591,14 +639,14 @@ export function deriveClose(s) {
   // Goal-level decisions belong to the human under every autonomy setting: auto only drops units.
   if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, or stop"];
   if (!ev.has("integrated")) return [10, "integrate", "run `integrate`"];
+  if (s.unproven.length) return [11, "prove", s.unproven.join(" ")];
   if (!ev.has("whole-review")) {
     if (ev.has("whole-blocking")) {
       if (s.fix_exists) return [9, "interrupt", "goal: the whole review is blocking again; `reopen`, `waive <goal> whole`, or stop"];
-      return [11, "add-fix", "run `add-fix` for the blocking finding in the log"];
+      return [12, "add-fix", "run `add-fix` for the blocking finding in the log"];
     }
-    return [11, "whole-review", "dispatch a verifier with `brief <goal> verifier whole`"];
+    return [12, "whole-review", "dispatch a verifier with `brief <goal> verifier whole`"];
   }
-  if (s.unproven.length) return [12, "prove", s.unproven.join(" ")];
   if (!ev.has("learned")) return [13, "learn", "write learn.md, then `stage learned`"];
   if (!ev.has("handed-off")) return [14, "handoff", "run `handoff`"];
   return [15, "done", "nothing left to do"];

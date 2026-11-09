@@ -66,9 +66,9 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 | 9 | `interrupt` | For each unit marked `(stuck: <note>)`, ask the human one question about that note (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
 | 9 | `auto-drop` | Only `S peek` shows this row: under `auto`, `S next` already drops stuck units and the units they block. Run `S next`. Goal-level questions are never dropped; they always come as `interrupt`. |
 | 10 | `integrate` | Run `S integrate <goal>`. Report holdout as pass or fail only. A failure becomes a goal-level `interrupt` on the next pass. |
-| 11 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. It records its advisory findings and its verdict itself. |
-| 11 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
-| 12 | `prove` | For each criterion listed, run `S prove <goal> <C>`. If the contract gives the criterion no command, `S prove` says so: run `S prove <goal> <C> "<command>"` with a command that shows it. If no command proves it, ask the human, who can `waive` it or `reopen` the goal. |
+| 11 | `prove` | For each criterion listed, run `S prove <goal> <C>`. If the contract gives the criterion no command, `S prove` says so: run `S prove <goal> <C> "<command>"` with a command that shows it. `S prove` refuses a command that passes whatever the code does, such as `true` or `echo`. If no command proves it, ask the human, who can `waive` it or `reopen` the goal. |
+| 12 | `whole-review` | Run a verifier: `S brief <goal> verifier whole`. Its brief lists what settled each criterion. It records its advisory findings and its verdict itself. |
+| 12 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
 | 14 | `handoff` | Run `S handoff <goal>` and print its report. Stop. |
 | 15 | `done` | The goal was handed off. Nothing is left to do. |
@@ -112,7 +112,9 @@ Record answers through the script, never by editing files:
 
 Write `.swarm/<goal>/learn.md` with two sections: `## zerg` (lessons about the swarm itself) and
 `## project` (lessons about this codebase). Each proposal is a heading in the form `### Pn. <rule> (add|change|remove)`,
-followed by the `log.md` lines that are its evidence. Write `none` under a section that has no proposals.
+followed by the `log.md` lines that are its evidence, copied word for word. Number proposals once across both
+sections. Write `none` under a section that has no proposals. `S stage` refuses a heading out of this form, a
+proposal with no evidence, and an evidence line that isn't in `log.md`.
 
 `S stage <goal> learned` routes each section:
 - `project` goes to `.swarm/LEARNINGS.md`. That file is committed, so later goals in this repo read it.

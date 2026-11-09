@@ -37,15 +37,15 @@ flowchart TD
     ALL -- yes --> I{Row 10 integrate: full suite and holdout}
     I -- fail --> G1{{Row 9 goal question: reopen or stop}}
     G1 -- reopen --> L
-    I -- pass --> WR[[Row 11 whole review]]
+    I -- pass --> PR{Row 11 prove every criterion}
+    PR -- no command proves one --> G3{{waive it, or reopen}}
+    G3 --> PR
+    PR -- all proven or waived --> WR[[Row 12 whole review: the change and its proofs]]
     WR -- blocking, first time --> AF[add-fix] --> L
     WR -- blocking again --> G2{{Row 9 goal question: reopen, waive whole, or stop}}
     G2 -- reopen --> L
-    G2 -- waive --> PR
-    WR -- pass --> PR{Row 12 prove every criterion}
-    PR -- no command proves one --> G3{{waive it, or reopen}}
-    G3 --> PR
-    PR -- all proven or waived --> LE[Row 13 learn: route both lanes]
+    G2 -- waive --> LE
+    WR -- pass --> LE[Row 13 learn: route both lanes]
     LE --> H{{Row 14 hand off: the human merges}}
 
     classDef human fill:#fde68a,stroke:#92400e,color:#1f2937
@@ -98,9 +98,9 @@ sequenceDiagram
     end
 
     O->>S: integrate (holdout: pass or fail only)
-    O->>V: brief verifier whole
-    V->>S: review whole, findings
     O->>S: prove each criterion
+    O->>V: brief verifier whole (lists the proofs)
+    V->>S: review whole, findings
     O->>S: stage learned (project lane to .swarm, zerg lane to the inbox)
     O->>S: handoff
     O->>H: report: diff, evidence, findings, cost

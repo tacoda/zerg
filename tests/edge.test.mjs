@@ -91,6 +91,11 @@ describe("the unit loop's failure paths", () => {
     assert.match(S("next G-1"), /row 0 stop/);
     fs.rmSync(r.at(".swarm/STOP"));
   });
+  test("a report needs its text", () => {
+    S("lease G-1 U-001");
+    assert.match(S("report G-1 U-001 escalated"), /give the one question/);
+    assert.match(S("report G-1 U-001 gave_up"), /say why/);
+  });
   test("a failing check revises the unit", () => {
     S("lease G-1 U-001");
     r.work("G-1", "U-001", "printf '\\ndef sub(a, b):\\n    return a + b\\n' >> src/calc.py");

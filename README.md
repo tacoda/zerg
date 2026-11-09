@@ -55,8 +55,8 @@ The row is the number `swarm.mjs next` prints when that step is due.
 | 8 | Implement: one unit per worktree, in parallel | worker | `lease`, `report` |
 | 6 | Check, review, then merge into `swarm/<goal>` | orchestrator, verifier | `check`, `review`, `merge` |
 | 10 | Integrate: full suite and holdout | orchestrator | `integrate` |
-| 11 | Whole review: cross-unit findings, one automatic fix unit | verifier | `review whole`, `add-fix` |
-| 12 | Prove: every criterion has a passing evidence command, or a waiver | orchestrator | `prove`, `waive` |
+| 11 | Prove: every criterion has a passing evidence command, or a waiver | orchestrator | `prove`, `waive` |
+| 12 | Whole review: cross-unit findings and the proofs, one automatic fix unit | verifier | `review whole`, `add-fix` |
 | 13 | Learn: lessons split into two lanes and routed | orchestrator | `stage learned` |
 | 14 | Hand off with the evidence, findings, and token cost; you merge | you | `handoff` |
 

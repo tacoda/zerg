@@ -27,7 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
-  blockers, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
+  blockers, isFinding, isNoOp, learnProblems, settledCriteria, settlements, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -609,7 +609,7 @@ function currentRow(goal) {
   const units = loadUnits(goal);
   const rows = entries(goal);
   const header = parseHeader(text);
-  const proven = new Set(rows.filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
+  const proven = settledCriteria(rows);
   const now = fingerprint(units, rows);
   const state = {
     stop: stopped(), bound: boundHit(rows, { budget: budget(goal), bounds: userBounds(), current: now, unitCount: units.length }), has_contract: true,
@@ -737,12 +737,13 @@ function restoreAfterVerifier(goal) {
 /** A worker reports its own result. Its worktree goes away; only commits on its branch count. */
 function cmdReport(goal, uid, outcome, ...text) {
   if (!["produced", "escalated", "gave_up"].includes(outcome)) fail("report outcome is produced, escalated, or gave_up");
+  const note = text.join(" ").trim();
+  if (!note) fail({ produced: "say what changed in one line", escalated: "give the one question a human can answer", gave_up: "say why" }[outcome]);
   const state = getUnit(loadUnits(goal), uid).state;
   if (state !== "leased") fail(`${uid} is ${state}, not leased, so this report is stale; nothing was changed`);
   if (outcome === "produced" && !commitsAhead(goal, uid)) {
     fail(`unit/${goal}/${uid} has no commits. Commit your work in the worktree, then report again; the worktree is kept`);
   }
-  const note = text.join(" ");
   removeWorktreeFor(`unit/${goal}/${uid}`);
   rmrf(worktreePath(goal, uid));
   if (outcome === "produced") moveUnit(goal, uid, "produced", note);
@@ -753,11 +754,12 @@ function cmdReport(goal, uid, outcome, ...text) {
 /** A verifier records its verdict. It may not have changed anything else in the tree. */
 function cmdReview(goal, subject, verdict, ...reason) {
   if (!["pass", "fail"].includes(verdict)) fail("review verdict is pass or fail");
+  const note = reason.join(" ").trim();
+  if (!note) fail(verdict === "pass" ? "a pass needs its strongest evidence" : "a fail needs its first blocking reason");
   onSwarm(goal);
-  const note = reason.join(" ");
   restoreAfterVerifier(goal);
   if (subject === "whole") {
-    require(goal, "integrated");
+    require(goal, "proved");
     log(goal, goal, verdict === "pass" ? "whole-review" : "whole-blocking", note);
     save(goal, `whole review ${verdict}`);
     return say(`whole review: ${verdict}`);
@@ -765,10 +767,17 @@ function cmdReview(goal, subject, verdict, ...reason) {
   if (getUnit(loadUnits(goal), subject).state !== "produced" || unitPhase(entries(goal), subject) !== "review") {
     fail(`${subject} isn't waiting for review; run \`peek\``);
   }
-  if (verdict === "fail") return revise(goal, subject, note || "verifier failed it without a reason");
+  if (verdict === "fail") return revise(goal, subject, note);
   log(goal, subject, "review-pass", note);
   save(goal, `${subject} review pass`);
   say(`${subject}: review pass; it merges next`);
+}
+
+/** Each criterion and what settled it, for the whole review to judge. */
+function proofLines(goal) {
+  const settled = settlements(entries(goal));
+  const show = (e) => (e.event === "waived" ? `waived by the human: ${e.note}` : e.note);
+  return criteria(contractText(goal)).map((c) => `  ${c}: ${settled.has(c) ? show(settled.get(c)) : "not settled"}`);
 }
 
 /** What a verifier reads. For the whole goal: everything after zerg's infrastructure commit, minus its own state. */
@@ -787,6 +796,7 @@ function cmdBrief(goal, role, uid = "-") {
   if (role === "worker") text.push(`WORKTREE: ${worktreePath(goal, uid)}`);
   if (role === "verifier") text.push(`TMP: ${fs.mkdtempSync(path.join(os.tmpdir(), "zerg-verify-"))}`, `DIFF: ${diffCommand(goal, uid)}`);
   if (role === "examiner") text.push(`HOLDOUT: ${holdoutDir(goal)}`);
+  if (role === "verifier" && uid === "whole") text.push("Proofs:", ...proofLines(goal));
   const strengthen = role === "examiner" ? strengthenUnits(entries(goal), loadUnits(goal)) : [];
   if (strengthen.length) text.push(`Strengthen: ${strengthen.join(", ")}`);
   say(text.join("\n"));
@@ -936,8 +946,7 @@ function cmdWaive(goal, target, ...why) {
   addDecision(goal, target, `waived: ${reason}`);
   if (target === "whole") log(goal, goal, "whole-review", `waived: ${reason}`);
   else log(goal, target, "waived", reason);
-  const settled = new Set(entries(goal).filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
-  if (target !== "whole" && criteria(text).every((c) => settled.has(c))) log(goal, goal, "proved");
+  if (target !== "whole" && criteria(text).every((c) => settledCriteria(entries(goal)).has(c))) log(goal, goal, "proved");
   save(goal, `waive ${target}`);
   say(`${target}: waived`);
 }
@@ -966,12 +975,12 @@ function cmdProve(goal, criterion, ...command) {
   if (!criteria(text).includes(criterion)) fail(`no criterion ${criterion}`);
   const evidence = command.join(" ") || criterionCommand(text, criterion);
   if (!evidence) fail(`${criterion}: the contract gives it no command, so give one`);
+  if (isNoOp(evidence)) fail(`${criterion}: \`${evidence}\` passes whatever the code does, so it proves nothing`);
   const [ok, output] = run(evidence, root());
   say(output);
   if (!ok) fail(`${criterion}: evidence command failed, so it is not proven`);
   log(goal, criterion, "proof", evidence);
-  const settled = new Set(entries(goal).filter((e) => ["proof", "waived"].includes(e.event)).map((e) => e.subject));
-  if (criteria(text).every((c) => settled.has(c))) log(goal, goal, "proved");
+  if (criteria(text).every((c) => settledCriteria(entries(goal)).has(c))) log(goal, goal, "proved");
   save(goal, `proof for ${criterion}`);
 }
 
@@ -982,6 +991,9 @@ function routeLearnings(goal) {
     fail("learn.md needs a `## zerg` and a `## project` section (write `none` under an empty one)");
   }
   const lanes = splitLanes(text);
+  const logLines = new Set(lines(read(path.join(goalDir(goal), "log.md"))).map((l) => l.trim()));
+  const problems = learnProblems(lanes, logLines);
+  if (problems.length) fail("learn.md:\n" + problems.join("\n"));
   const when = `${goal} (${stamp(false)})`;
   const routed = [];
   if (lanes.project) {
@@ -1001,6 +1013,7 @@ function cmdStage(goal, event, ...note) {
   const needs = { "whole-review": "integrated", learned: "proved", finding: "approved" };
   if (!(event in needs)) fail(`stage is one of ${Object.keys(needs).join(", ")}`);
   require(goal, needs[event]);
+  if (event === "finding" && !isFinding(note.join(" "))) fail("a finding is `file:line: what is wrong`");
   if (event === "learned") {
     const routed = routeLearnings(goal);
     note.push(routed.join("; ") || "no proposals");

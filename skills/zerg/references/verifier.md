@@ -26,7 +26,9 @@ The script has already checked the scope and run the unit's tests.
 1. Read the diff: run the `DIFF` command from your brief. It leaves out zerg's own state and setup commit.
 2. Look for what the per-unit reviews couldn't see: logic duplicated across units, names that drifted,
    a criterion nothing serves, or pieces that don't fit together.
-3. Record each advisory finding with `S stage <goal> finding "<file:line: finding>"`.
+   Your brief's `Proofs` list says what settled each criterion. A proof whose command doesn't show its criterion
+   leaves that criterion unmet.
+3. Record each advisory finding with `S stage <goal> finding "<file:line: finding>"`. The script refuses any other form.
 4. Record your verdict, and then stop:
    - `S review <goal> whole pass "<summary>"`
    - `S review <goal> whole fail "<the blocking finding>"`. A finding is blocking only if it breaks a Constraint or leaves a criterion unmet.

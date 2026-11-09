@@ -145,7 +145,10 @@ describe("derive", () => {
     const units = [unit("U-001", "a", { state: "merged" })];
     const events = new Set(["approved", "defined", "baseline"]);
     assert.equal(swarm.derive(state({ units, events }))[1], "integrate");
-    ["integrated", "whole-review"].forEach((e) => events.add(e));
+    events.add("integrated");
+    assert.deepEqual(swarm.derive(state({ units, events, unproven: ["C1"] })).slice(0, 2), [11, "prove"]);
+    assert.deepEqual(swarm.derive(state({ units, events })).slice(0, 2), [12, "whole-review"]);
+    events.add("whole-review");
     assert.equal(swarm.derive(state({ units, events, unproven: ["C1"] }))[1], "prove");
     ["learned", "handed-off"].forEach((e) => events.add(e));
     assert.equal(swarm.derive(state({ units, events }))[1], "done");
@@ -440,4 +443,35 @@ test("a criterion's command comes from the contract: negated greps, or a body th
   assert.equal(swarm.criterionCommand(text, "C2"), "npm ci && npm test");
   assert.equal(swarm.criterionCommand(text, "C3"), "");
   assert.equal(swarm.criterionCommand(text, "C4"), "");
+});
+
+describe("batch 2 trust gates", () => {
+  const LOG = new Set(["- 2026-11-08T20:53:15 | U-005 | examiner-finding | edit the lockfile"]);
+  const learn = (zerg, project = "none") => swarm.splitLanes(`# Learn\n\n## zerg\n\n${zerg}\n\n## project\n\n${project}\n`);
+
+  test("learn.md proposals need the heading form, real evidence, and unique numbers", () => {
+    const good = "### P1. edit lockfiles in three places (add)\n- 2026-11-08T20:53:15 | U-005 | examiner-finding | edit the lockfile\nwhy";
+    assert.deepEqual(swarm.learnProblems(learn(good), LOG), []);
+    assert.match(swarm.learnProblems(learn("### lockfiles\n- x"), LOG)[0], /must look like "### P1\./);
+    assert.match(swarm.learnProblems(learn("### P1. a rule (add)\njust prose"), LOG)[0], /quote at least one log\.md line/);
+    assert.match(swarm.learnProblems(learn("### P1. a rule (add)\n- 2026-01-01T00:00:00 | U-1 | merged | ok"), LOG)[0], /isn't in log\.md/);
+    assert.match(swarm.learnProblems(learn("some thoughts"), LOG)[0], /text before its first/);
+    assert.match(swarm.learnProblems(learn(good, good), LOG).join("\n"), /P1 is used twice/);
+  });
+
+  test("a no-op proof is caught, a real one is not", () => {
+    for (const cmd of ["true", ":", "exit 0", "echo ok", "echo ok && true", "printf x; :"]) assert.ok(swarm.isNoOp(cmd), cmd);
+    for (const cmd of ["npm test", "echo start && npm test", "! grep -rn x src", "false"]) assert.ok(!swarm.isNoOp(cmd), cmd);
+  });
+
+  test("a finding names file:line", () => {
+    assert.ok(swarm.isFinding("src/a.js:4: repeated call"));
+    assert.ok(!swarm.isFinding("repeated call"));
+    assert.ok(!swarm.isFinding("src/a.js: no line"));
+  });
+
+  test("a reopen voids earlier proofs but keeps waivers", () => {
+    const rows = [["C1", "proof"], ["C2", "waived"], ["G-1", "reopened"], ["C3", "proof"]].map(([subject, event]) => ({ subject, event, note: "" }));
+    assert.deepEqual([...swarm.settledCriteria(rows)].sort(), ["C2", "C3"]);
+  });
 });

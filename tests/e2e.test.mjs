@@ -242,8 +242,22 @@ test("worker F-1", () => {
 });
 step("integrate again after the fix", "$S next G-1", /row 10 integrate/);
 step("integrate", "$S integrate G-1", /"suite": "pass"/);
-step("whole review fails", "$S review G-1 whole fail 'duplicate helper'", /whole review: fail/);
-step("next says add-fix", "$S next G-1", /row 11 add-fix/);
+step("next says prove, before the whole review", "$S next G-1", /row 11 prove: C1 C2/);
+step("the whole review waits for the proofs", "$S review G-1 whole pass 'all fits'", /`proved` hasn't happened yet/);
+const PROVE_C1 = "$S prove G-1 C1 \"PYTHONPATH=src python3 -c 'from calc import sub; assert sub(5, 3) == 2'\"";
+step("prove C1", `${PROVE_C1} && tail -1 .swarm/G-1/log.md`, /\| proof \|/);
+step("a no-op proof is refused", "$S prove G-1 C2 'echo ok && true'", /proves nothing/);
+step("a failing proof is refused", "$S prove G-1 C2 false", /not proven/);
+step("a criterion with no command in the contract needs one", "$S prove G-1 C2", /gives it no command/);
+step("waive needs a reason", "$S waive G-1 C2", /needs a reason/);
+step("the human waives C2", "$S waive G-1 C2 'covered by the integration suite' && tail -1 .swarm/G-1/log.md", /\| proved \|/);
+step("the whole verifier's brief lists what settled each criterion", "$S brief G-1 verifier whole",
+  /Proofs:\n  C1: PYTHONPATH=src python3[^\n]*\n  C2: waived by the human: covered by the integration suite/);
+step("a verdict needs a reason", "$S review G-1 whole fail", /needs its first blocking reason/);
+step("a finding needs file:line", "$S stage G-1 finding 'duplicate helper'", /file:line/);
+step("a finding with file:line is logged", "$S stage G-1 finding 'src/util.py:1: duplicate helper'", /G-1: finding/);
+step("whole review fails", "$S review G-1 whole fail 'src/util.py:1: duplicate helper'", /whole review: fail/);
+step("next says add-fix", "$S next G-1", /row 12 add-fix/);
 step("add-fix adds the orchestrator's one fix", "$S add-fix G-1 dedupe src/dedupe.py", /added F-2/);
 test("worker F-2", () => {
   sh("$S lease G-1 F-2");
@@ -251,15 +265,12 @@ test("worker F-2", () => {
   sh("$S report G-1 F-2 produced dedupe && $S check G-1 F-2 && $S review G-1 F-2 pass ok && $S merge G-1 F-2");
 });
 step("integrate after F-2", "$S integrate G-1", /"suite": "pass"/);
-step("the whole review blocks again", "$S review G-1 whole fail 'still duplicated'", /whole review: fail/);
+step("the fix voids the old proof but keeps the waiver", "$S next G-1", /row 11 prove: C1$/m);
+step("prove C1 again", `${PROVE_C1} && tail -1 .swarm/G-1/log.md`, /\| proved \|/);
+step("the whole review blocks again", "$S review G-1 whole fail 'src/util.py:1: still duplicated'", /whole review: fail/);
 step("a second block is a goal-level question", "$S next G-1", /row 9 interrupt: goal: the whole review is blocking again/);
 step("add-fix runs only once", "$S add-fix G-1 again src/again.py", /runs once per goal/);
 step("the human waives the whole review", "$S waive G-1 whole 'duplication accepted for now'", /whole: waived/);
-step("prove C1", "$S prove G-1 C1 \"PYTHONPATH=src python3 -c 'from calc import sub; assert sub(5, 3) == 2'\" && tail -1 .swarm/G-1/log.md", /\| proof \|/);
-step("a failing proof is refused", "$S prove G-1 C2 false", /not proven/);
-step("a criterion with no command in the contract needs one", "$S prove G-1 C2", /gives it no command/);
-step("waive needs a reason", "$S waive G-1 C2", /needs a reason/);
-step("the human waives C2", "$S waive G-1 C2 'covered by the integration suite' && tail -1 .swarm/G-1/log.md", /\| proved \|/);
 
 test("the lock keeps all 10 parallel writes", async () => {
   await Promise.all(Array.from({ length: 10 }, (_, i) => new Promise((resolve) =>
@@ -280,8 +291,15 @@ test("state commits ignore the user's commit hooks", () => {
 });
 
 step("next says learn", "$S next G-1", /row 13 learn/);
-test("write learn.md", () => write(".swarm/G-1/learn.md",
-  "# Learn\n\n## zerg\n\n### P1. demo zerg rule (add)\nlog.md:3\n\n## project\n\n### P2. demo project rule (add)\nlog.md:4\n"));
+test("learn.md with evidence that isn't in the log is refused", () => {
+  write(".swarm/G-1/learn.md", "# Learn\n\n## zerg\n\n### P1. demo zerg rule (add)\n- 2026-01-01T00:00:00 | G-1 | integrated |\n\n## project\n\nnone\n");
+  assert.match(sh("$S stage G-1 learned"), /P1: this evidence isn't in log\.md/);
+});
+test("write learn.md", () => {
+  const evidence = (event) => sh(`grep '| ${event} |' .swarm/G-1/log.md | tail -1`).trim();
+  write(".swarm/G-1/learn.md", `# Learn\n\n## zerg\n\n### P1. demo zerg rule (add)\n${evidence("whole-blocking")}\n\n` +
+    `## project\n\n### P2. demo project rule (add)\n${evidence("integrated")}\n`);
+});
 step("learn routes both lanes", "$S stage G-1 learned", /zerg -> .*inbox\.md/);
 step("the project lesson is committed", "git show swarm/G-1:.swarm/LEARNINGS.md", /demo project rule/);
 step("the inbox lists the zerg lesson", "$S inbox", /\/G-1\/P1/);
