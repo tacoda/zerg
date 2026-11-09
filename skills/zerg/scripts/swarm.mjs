@@ -27,7 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
-  blockers, isFinding, isNoOp, learnProblems, settledCriteria, settlements, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
+  blockers, folderScopeProblems, isFinding, isNoOp, learnProblems, settledCriteria, settlements, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -461,6 +461,8 @@ function cmdNew(goal) {
   say(`created .swarm/${goal}: fill contract.md and plan.md, then run lint`);
 }
 
+const isFolder = (/** @type {string} */ rel) => fs.statSync(path.join(root(), rel), { throwIfNoEntry: false })?.isDirectory() ?? false;
+
 function runGrepCriteria(text, units) {
   return grepCriteria(text).flatMap(([cid, command]) => {
     const argv = grepArgv(command);
@@ -474,7 +476,8 @@ function allPlanProblems(goal) {
   const text = contractText(goal);
   const units = loadUnits(goal);
   const template = read(path.join(TEMPLATES, "contract.md"));
-  return [...lintProblems(text, units), ...templateProblems(text, template, units), ...runGrepCriteria(text, units)];
+  return [...lintProblems(text, units), ...templateProblems(text, template, units), ...runGrepCriteria(text, units),
+    ...folderScopeProblems(units, isFolder)];
 }
 
 function cmdLint(goal) {
@@ -930,6 +933,8 @@ function cmdRescope(goal, uid, scope, ...reason) {
   const clash = units.filter((u) => u.unit !== uid && !CLOSED.includes(u.state) && globsOverlap(scopeGlobs(scope), scopeGlobs(u.scope)))
     .map((u) => u.unit);
   if (clash.length) fail(`new scope overlaps open units: ${clash.join(", ")}`);
+  const folders = folderScopeProblems([{ ...unit, scope }], isFolder);
+  if (folders.length) fail(folders.join("\n"));
   const text = reason.join(" ") || "human decision";
   addDecision(goal, uid, `scope is now ${scope}: ${text}`);
   updateUnit(goal, uid, { event: "rescoped", note: `${scope}: ${text}`, fields: { scope, state: "planned", revisions: "0", note: `rescoped: ${text}` } });

@@ -206,6 +206,13 @@ export function criterionCommand(text, cid) {
 export const grepHitFiles = (output) =>
   [...new Set(lines(output).filter((l) => l.trim()).map((l) => partition(l, ":")[0]))].sort();
 
+/** A scope entry that names a folder matches no file, so a unit with it could never change what's inside.
+ * @param {Unit[]} units @param {(p: string) => boolean} isFolder */
+export function folderScopeProblems(units, isFolder) {
+  return units.flatMap((u) => scopeGlobs(u.scope).filter((g) => !WILD.test(g) && isFolder(g))
+    .map((g) => `${u.unit}: scope ${g} is a folder, and a scope matches files; write ${g.replace(/\/+$/, "")}/**`));
+}
+
 /** Every file a grep criterion hits must sit in the scope of a unit that serves that criterion. */
 export function grepProblems(cid, files, units) {
   const globs = units.filter((u) => splitList(u.criteria).includes(cid)).flatMap((u) => scopeGlobs(u.scope));

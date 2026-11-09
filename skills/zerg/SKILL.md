@@ -88,7 +88,8 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
    - Write a criterion that one command shows as that command alone, in backticks: ``- C5: `npm ci && npm test` ``. `S prove` runs it.
    - Use Constraints to name edge cases and behavior that must not change.
 5. Fill in `.swarm/<goal>/plan.md`:
-   - Give each unit a scope of product files only, plus `after` and `criteria`.
+   - Give each unit a scope of product files only, plus `after` and `criteria`. A scope entry matches files, so
+     write a folder as `dir/**`. Lint refuses a bare folder.
    - Give a change that two units need its own unit.
 6. Run `S lint <goal>` until it passes. Lint refuses more than 6 units. If the goal holds more than one shippable
    outcome, or needs more units, plan the first goal and name the rest.

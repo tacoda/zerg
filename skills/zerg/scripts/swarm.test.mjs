@@ -482,3 +482,12 @@ test("a plan of more than 6 units is more than one goal; fix units don't count",
   assert.match(swarm.planProblems(rows(7), ["C1"]).join("\n"), /plan: 7 units; plan the first 6 or fewer/);
   assert.deepEqual(swarm.planProblems([...rows(6), ...rows(2, "F").map((u, i) => ({ ...u, unit: `F-${i + 1}` }))], ["C1"]), []);
 });
+
+test("a scope entry that names a folder is a lint problem; a glob over it is not", () => {
+  const units = [unit("U-001", "vendor/old, package.json"), unit("U-002", "vendor/new/**"), unit("U-003", "lib/")];
+  const folders = new Set(["vendor/old", "vendor/new", "lib/"]);
+  assert.deepEqual(swarm.folderScopeProblems(units, (p) => folders.has(p)), [
+    "U-001: scope vendor/old is a folder, and a scope matches files; write vendor/old/**",
+    "U-003: scope lib/ is a folder, and a scope matches files; write lib/**",
+  ]);
+});

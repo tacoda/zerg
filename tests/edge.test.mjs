@@ -42,6 +42,11 @@ describe("approve gates", () => {
     assert.match(r.sh("git branch swarm/G-1 && $S approve G-1 ask"), /swarm\/G-1 already exists/);
     r.sh("git branch -q -D swarm/G-1");
   });
+  test("with a folder as a scope entry", () => {
+    r.edit(".swarm/G-1/plan.md", "| src/mul.py |", "| src |");
+    assert.match(r.sh("$S lint G-1"), /U-002: scope src is a folder, and a scope matches files; write src\/\*\*/);
+    r.edit(".swarm/G-1/plan.md", "| src |", "| src/mul.py |");
+  });
   test("refused attempts left no swarm branch, then approve works", () => {
     assert.equal(r.sh("git branch --list 'swarm/*'").trim(), "");
     assert.match(r.sh("$S approve G-1 ask"), /on swarm\/G-1/);
