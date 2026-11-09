@@ -2,6 +2,10 @@
 
 The row numbers are the ones `swarm.mjs next` prints. Yellow boxes wait for a human; blue boxes are roles.
 
+Two rows can come at any step, so the chart leaves them out. Row 0 stops while `.swarm/STOP` exists; delete it
+to go on. Row 1 stops at a bound (no progress, the iteration cap, or the token budget), and SKILL.md says how to
+lift each one.
+
 ## Flow
 
 ```mermaid
@@ -9,7 +13,7 @@ flowchart TD
     A([goal in plain language]) --> P[Row 2 plan: new, contract, plan, lint]
     P --> AP{{Row 3 approve: summary, then the human}}
     AP -- revise --> P
-    AP -- stop --> X([stop])
+    AP -- stop --> X([abandon: the plan is removed])
     AP -- approve, ask or auto --> B[approve: clean tree, green suite, branch swarm/goal]
     B --> D[[Row 4 define: examiner writes tests and the hidden holdout]]
     D --> F{findings open?}
@@ -19,7 +23,7 @@ flowchart TD
     BL -- yes --> L[Row 8 lease: a worktree per unit, then setup]
     L --> W[[workers in parallel, each reports]]
     W -- produced --> C{Row 6 check: scope, examiner tests, unit check}
-    W -- escalated --> ST{{Row 9 stuck: answer, rescope, or drop}}
+    W -- escalated --> ST{{Row 9 stuck: answer, rescope, or drop, and under auto next drops it}}
     W -- gave up --> R
     C -- fail --> R[revise]
     C -- ok --> V[[Row 6 review: verifier]]
@@ -37,14 +41,18 @@ flowchart TD
     ALL -- yes --> I{Row 10 integrate: full suite and holdout}
     I -- fail --> G1{{Row 9 goal question: reopen or abandon}}
     G1 -- reopen --> L
+    G1 -- flaky: integrate again --> I
+    G1 -- abandon --> AB([abandoned: swarm/goal kept as the record])
     I -- pass --> PR{Row 11 prove every criterion}
     PR -- no command proves one --> G3{{waive it, or reopen}}
-    G3 --> PR
+    G3 -- waive --> PR
+    G3 -- reopen --> L
     PR -- all proven or waived --> WR[[Row 12 whole review: the change and its proofs]]
     WR -- blocking, first time --> AF[add-fix] --> L
     WR -- blocking again --> G2{{Row 9 goal question: reopen, waive whole, or abandon}}
     G2 -- reopen --> L
     G2 -- waive --> LE
+    G2 -- abandon --> AB
     WR -- pass --> LE[Row 13 learn: route both lanes]
     LE --> H{{Row 14 hand off: the human merges}}
 

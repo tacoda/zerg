@@ -309,6 +309,19 @@ describe("inputs zerg can't use are refused before approval", () => {
   });
 });
 
+describe("abandon before approval", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("removes the plan and its folders, so the next goal starts on a clean tree", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    const holdout = /HOLDOUT: (.+)/.exec(r.sh("$S brief G-1 examiner"))?.[1] ?? "";
+    assert.match(r.sh("$S abandon G-1 wrong goal"), /abandoned before approval; removed \.swarm\/G-1/);
+    assert.ok(!fs.existsSync(r.at(".swarm/G-1")) && !fs.existsSync(holdout));
+    assert.equal(r.sh("git branch --list 'swarm/*'").trim(), "");
+    assert.match(r.sh("$S abandon G-1 again"), /no goal G-1/);
+  });
+});
+
 describe("token budget and the lock", () => {
   const r = makeRepo();
   after(r.cleanup);

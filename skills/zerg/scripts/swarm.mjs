@@ -64,7 +64,8 @@ const USAGE = `zerg control plane
   tokens <goal> <who> <stage> <n>     record a dispatch's token use
   status <goal>                       unit table, goal events, token totals
   handoff <goal>                      final report, clean up, then check out base
-  abandon <goal> <why>                a human decision: stop for good; keeps swarm/<goal> as the record
+  abandon <goal> <why>                a human decision: stop for good; keeps swarm/<goal> as the record,
+                                      or, before approval, removes the plan
 
 User layer, in $ZERG_HOME (default ~/.zerg), outside the skill so it survives updates:
   home                                paths and the bounds in effect
@@ -1232,7 +1233,7 @@ function cmdHandoff(goal) {
 function cmdAbandon(goal, ...why) {
   const reason = why.join(" ").trim();
   if (!reason) fail("abandon needs a reason; it goes in the contract");
-  require(goal, "approved");
+  if (!goalEvents(entries(goal)).has("approved")) return abandonPlan(goal);
   onSwarm(goal);
   addDecision(goal, "goal", `abandoned: ${reason}`);
   log(goal, goal, "abandoned", reason);
@@ -1242,6 +1243,15 @@ function cmdAbandon(goal, ...why) {
   const base = parseHeader(contractText(goal)).base;
   git(["checkout", "-q", base]);
   say(`${goal}: abandoned. swarm/${goal} keeps the record; checked out ${base}.`);
+}
+
+/** Before approval nothing is branched: the plan and the folders `new` made are all there is to remove. */
+function abandonPlan(goal) {
+  requireFile(goal, "contract.md");
+  rmrf(goalDir(goal));
+  rmrf(holdoutDir(goal));
+  rmrf(userDir("work", goal));
+  say(`${goal}: abandoned before approval; removed .swarm/${goal}. Nothing was branched.`);
 }
 
 const LOCK_FREE = new Set(["peek", "status", "summary", "brief", "lint"]);

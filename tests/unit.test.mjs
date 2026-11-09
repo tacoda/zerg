@@ -1,10 +1,10 @@
-// Self-check for the pure parts of swarm.mjs. Run: node --test skills/zerg/scripts/
+// Self-check for the pure parts of swarm.mjs. Run: node --test tests/
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
-import * as swarm from "./swarm.mjs";
+import * as swarm from "../skills/zerg/scripts/swarm.mjs";
 
 const CONTRACT = `# G-1: demo
 

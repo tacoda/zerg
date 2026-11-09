@@ -1,17 +1,17 @@
 ---
 name: zerg
-description: Runs a governed swarm of agents on one goal in a git repo, from a plain-language goal to a tested branch ready to merge. You write the contract and plan, the human approves once, then examiner, worker, and verifier roles run test-first stages while a script enforces every gate, bound, and state change. Safe to re-invoke to resume. Also reviews the lessons past goals sent back. Use when asked to swarm a goal, run zerg, resume a zerg goal by id, or review zerg lessons.
+description: Runs a governed swarm of agents on one goal in a git repo, from a plain-language goal to a tested branch ready to merge. You write the contract and plan, the human approves once, then examiner, worker, and verifier roles run test-first stages while a script enforces every gate, bound, and state change. Safe to re-invoke to resume. Also reviews the lessons past goals sent back. Use when asked to swarm a goal, run zerg, resume, check on, or abandon a zerg goal by id, or review zerg lessons.
 license: MIT
 compatibility: Needs git, Node.js 18 or later, and a repo whose test suite runs from one command. Works in any agent that can run shell commands; uses subagents when the agent has them.
 metadata:
   author: tacoda
-  version: "0.6.0"
+  version: "1.0.0"
 ---
 
 # zerg
 
 You are the orchestrator. Find the absolute path of the directory that holds this file and call it `SKILL_DIR`.
-`S` means `node SKILL_DIR/scripts/swarm.mjs`. Run it from inside the target repo.
+`S` means `node "SKILL_DIR/scripts/swarm.mjs"`, quoted because the path may hold spaces. Run it from inside the target repo.
 
 The script holds every gate, bound, and state change. You run `S next <goal>`, do the one action it prints, and
 run it again. You never write product code or tests, and you never edit `plan.md` or `log.md` by hand.
@@ -19,6 +19,7 @@ The roles do the work: the examiner writes tests, workers write code, and verifi
 
 **Starting and resuming.** For a new goal, start at Planning. To resume one, run `S next <goal>`. A goal's state
 lives on its branch, so if `S` says to check out `swarm/<goal>`, do that first, then run `S next <goal>` again.
+To show where a goal stands without moving it, run `S status <goal>`. To stop a goal for good, see Asking.
 
 ## Iron laws
 
@@ -51,9 +52,9 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 
 | Row | Action | Do this |
 |---|---|---|
-| 0, 1 | `stop` | Report the detail. Stop. |
+| 0, 1 | `stop` | Report the detail and how the human can go on, then stop. `.swarm/STOP`: delete the file. Iteration cap: `S config max_passes <n>`. Token budget: raise `token_budget:` in the contract. No progress: the human answers what blocks it, or raises `S config no_progress <n>`. |
 | 2 | `scope`, `plan` | Plan the goal (see Planning). |
-| 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. If they stop, do nothing more: nothing was branched yet. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
+| 3 | `approve` | Print `S summary <goal>`. Ask the human: approve and ask on stuck, approve and auto-drop stuck, revise with a note, or stop. If they stop, run `S abandon <goal> "<why>"`: it removes the plan, and nothing was branched yet. On approval, run `S approve <goal> ask` or `S approve <goal> auto`. |
 | 4 | `define` | Run the examiner: `S brief <goal> examiner`. It records its checks with `S define`. |
 | 4 | `amend` | For each unit listed, run `S amend <goal> <unit>`. It adds the unit's findings from `log.md` to its task. If a finding needs a file outside the unit's scope, ask the human first, who can `rescope` the unit. |
 | 5 | `baseline` | Run `S baseline <goal>`. If units pass before any work, run the examiner again: `S brief <goal> examiner` now names them under `Strengthen:`. |
@@ -61,7 +62,7 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 | 6 | `review` | Run a verifier per unit: `S brief <goal> verifier <unit>`. It records its verdict with `S review`. |
 | 6 | `merge` | Run `S merge <goal> <unit>` for each unit. |
 | 7 | `orphans` | Only `S peek` shows this row: `S next` already moves a lease that lost its worktree or outlived `lease_minutes` back to planned. Run `S next`. |
-| 7 | `wait` | Workers still hold leases. Wait for them to report, then run `S next` again. |
+| 7 | `wait` | Workers still hold leases. Wait until they report, then run `S next` again. Don't poll `S next` in a loop. |
 | 8 | `implement` | Run `S lease <goal> <units>`, then a worker per unit: `S brief <goal> worker <unit>`. Each records its result with `S report`. |
 | 9 | `interrupt` | For each unit marked `(stuck: <note>)`, ask the human one question about that note (see Asking). A unit marked `(blocked by …)` clears when its blocker does, or the human drops it. A `goal:` detail is a goal-level question: ask it as written. |
 | 9 | `auto-drop` | Only `S peek` shows this row: under `auto`, `S next` already drops stuck units and the units they block. Run `S next`. Goal-level questions are never dropped; they always come as `interrupt`. |
@@ -71,7 +72,7 @@ That's what the hand-off's cost and the optional `token_budget` count. If your a
 | 12 | `add-fix` | Run `S add-fix <goal> "<task>" "<scope>"` for the blocking finding in `log.md`. It runs once per goal; a second block goes to the human. |
 | 13 | `learn` | Write `learn.md` (see Learning), then run `S stage <goal> learned`. |
 | 14 | `handoff` | Run `S handoff <goal>` and print its report. It removes the goal's worktrees, scratch folders, and merged unit branches. Stop. |
-| 15 | `done` | The goal was handed off. Nothing is left to do. |
+| 15 | `done` | The goal was handed off, or the human abandoned it. Nothing is left to do. |
 
 ## Planning (row 2)
 
@@ -111,7 +112,7 @@ Record answers through the script, never by editing files:
 | retry an integration the human calls flaky | `S answer <goal> goal "<q>: <a>"`, then `S integrate <goal>` |
 | accept a criterion without proof | `S waive <goal> <C> "<why>"` |
 | accept the whole change despite a blocking review | `S waive <goal> whole "<why>"` |
-| stop the goal for good | `S abandon <goal> "<why>"`. It keeps `swarm/<goal>` as the record, removes the worktrees, merged unit branches, and holdout, and checks out the base branch. |
+| stop the goal for good | `S abandon <goal> "<why>"`. After approval, it keeps `swarm/<goal>` as the record, removes the worktrees, merged unit branches, and holdout, and checks out the base branch. Before approval, it removes the plan. |
 
 ## Learning (row 13)
 
