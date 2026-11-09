@@ -150,6 +150,7 @@ test("a lease whose worktree is gone is an orphan, and next reclaims it", () => 
   sh(`git worktree remove --force "${tree("U-001")}"`);
   assert.match(sh("$S peek G-1"), /row 7 orphans: U-001/);
   assert.match(sh("$S next G-1"), /U-001: leased -> planned[\s\S]*row 8 implement: U-001/);
+  assert.doesNotMatch(sh("grep '^| U-001 ' .swarm/G-1/plan.md"), /lease lost/, "the note keeps the last failure for the next worker");
 });
 step("and is leased again", "$S lease G-1 U-001", /worktree/);
 test("answer refuses a unit that isn't stuck, and leaves the contract alone", () => {
@@ -243,7 +244,7 @@ test("worker F-1", () => {
 step("integrate again after the fix", "$S next G-1", /row 10 integrate/);
 step("integrate", "$S integrate G-1", /"suite": "pass"/);
 step("next says prove, before the whole review", "$S next G-1", /row 11 prove: C1 C2/);
-step("the whole review waits for the proofs", "$S review G-1 whole pass 'all fits'", /`proved` hasn't happened yet/);
+step("the whole review waits for the proofs", "$S review G-1 whole pass 'all fits'", /only at row `whole-review`; the goal is at row 11 `prove`/);
 const PROVE_C1 = "$S prove G-1 C1 \"PYTHONPATH=src python3 -c 'from calc import sub; assert sub(5, 3) == 2'\"";
 step("prove C1", `${PROVE_C1} && tail -1 .swarm/G-1/log.md`, /\| proof \|/);
 step("a no-op proof is refused", "$S prove G-1 C2 'echo ok && true'", /proves nothing/);

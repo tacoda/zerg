@@ -220,14 +220,26 @@ export function grepProblems(cid, files, units) {
     .map((f) => `${cid}: its grep hits ${f}, which no unit serving ${cid} has in scope`);
 }
 
-/** Units with an examiner finding not yet routed into their task by `amend`. @param {Entry[]} rows */
-export function openFindings(rows) {
+/** Planned units with an examiner finding not yet routed into their task by `amend`. A unit that is no longer
+ * planned can't be amended, and its finding no longer matters. @param {Entry[]} rows @param {Unit[]} units */
+export function openFindings(rows, units) {
+  const planned = new Set(units.filter((u) => u.state === "planned").map((u) => u.unit));
   const open = new Set();
   for (const e of rows) {
     if (e.event === "examiner-finding") open.add(e.subject);
     else if (e.event === "amended") open.delete(e.subject);
   }
-  return [...open].sort();
+  return [...open].filter((uid) => planned.has(uid)).sort();
+}
+
+/** A unit's last failure since a human last changed its course; '' when it has none. @param {Entry[]} rows */
+export function lastFailure(rows, uid) {
+  let last = "";
+  for (const e of rows.filter((r) => r.subject === uid)) {
+    if (["answered", "rescoped"].includes(e.event)) last = "";
+    else if (["revise", "stuck"].includes(e.event)) last = clean(e.note);
+  }
+  return last;
 }
 
 /** learn.md has a `## zerg` and a `## project` section; each body, or '' when it holds no proposal. */
@@ -506,11 +518,12 @@ export function lintProblems(text, units) {
 export const checkTransition = (current, target) =>
   (TRANSITIONS[current] ?? []).includes(target) ? null : `illegal transition: ${current} -> ${target}`;
 
-/** Two strikes: a third failure, or the same failure word for word, makes the unit stuck. @param {Unit} unit */
-export function reviseUnit(unit, note, maxRevisions = BOUNDS.max_revisions) {
+/** Two strikes: a third failure, or the same failure word for word as the last one, makes the unit stuck.
+ * @param {Unit} unit @param {string} note @param {string} previous the unit's last failure, from `lastFailure` */
+export function reviseUnit(unit, note, maxRevisions = BOUNDS.max_revisions, previous = unit.note) {
   const text = clean(note);
   const revisions = (parseInt(unit.revisions, 10) || 0) + 1;
-  const stuck = revisions > maxRevisions || text === unit.note;
+  const stuck = revisions > maxRevisions || (text !== "" && text === previous);
   return { ...unit, revisions: String(revisions), state: stuck ? "stuck" : "planned", note: text };
 }
 
@@ -551,6 +564,8 @@ export function goalEvents(entries) {
   const events = new Set();
   for (const e of entries) {
     if (e.event === "reopened") ["integrated", "integrate-failed", "proved", "whole-blocking", "whole-review"].forEach((x) => events.delete(x));
+    // A passing integration clears an earlier failure, so a flaky run can be retried.
+    if (e.event === "integrated") events.delete("integrate-failed");
     events.add(e.event);
   }
   return events;
@@ -649,7 +664,7 @@ export function deriveUnits(s) {
 export function deriveClose(s) {
   const ev = s.events;
   // Goal-level decisions belong to the human under every autonomy setting: auto only drops units.
-  if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, or `abandon`"];
+  if (ev.has("integrate-failed")) return [9, "interrupt", "goal: integration failed; `reopen` with a fix unit, run `integrate` again if the failure was flaky, or `abandon`"];
   if (!ev.has("integrated")) return [10, "integrate", "run `integrate`"];
   if (s.unproven.length) return [11, "prove", s.unproven.join(" ")];
   if (!ev.has("whole-review")) {

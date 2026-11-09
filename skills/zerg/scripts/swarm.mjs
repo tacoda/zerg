@@ -27,7 +27,7 @@ import {
   quoted, readyUnits, renderInbox, renderTable, replaceTable, reviseUnit,
   rowProblems, scopeViolations, section, setHeader, shellStep, shellWords,
   splitLanes, splitList, testViolations, tokenTotal, unitPhase,
-  blockers, folderScopeProblems, isFinding, isNoOp, learnProblems, settledCriteria, settlements, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
+  blockers, folderScopeProblems, lastFailure, isFinding, isNoOp, learnProblems, settledCriteria, settlements, orphanedLeases, stuckDetail, insertDecision, templateProblems, strengthenUnits, TEST_CHECK, scopeGlobs, normalizeNewlines, parsePorcelainZ, slug, resolveCheck,
 } from "./core.mjs";
 
 export * from "./core.mjs";
@@ -59,7 +59,7 @@ const USAGE = `zerg control plane
   add-fix <goal> <task> <scope>       the orchestrator's one automatic fix for a blocking whole review
   integrate <goal>                    full suite + holdout; holdout reports pass/fail only
   prove <goal> <criterion> [cmd..]    run evidence for one criterion, the contract's command by default
-  stage <goal> whole-review|learned|finding [note]   \`learned\` routes learn.md: project lane to
+  stage <goal> learned|finding [note] \`learned\` routes learn.md: project lane to
                                       .swarm/LEARNINGS.md, zerg lane to $ZERG_HOME/inbox.md
   tokens <goal> <who> <stage> <n>     record a dispatch's token use
   status <goal>                       unit table, goal events, token totals
@@ -163,11 +163,18 @@ function within(base, ...parts) {
 }
 const goalDir = (/** @type {string} */ goal) => path.join(root(), ".swarm", goal);
 
+const branchExists = (/** @type {string} */ name) => git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`], { check: false }).code === 0;
+
+/** A goal's state lives on its branch; from any other branch, say where it is. */
+function requireBranch(goal) {
+  if (branchExists(`swarm/${goal}`)) fail(`${goal}: state lives on swarm/${goal}; check it out first`);
+}
+
 function requireFile(goal, name) {
   const file = path.join(goalDir(goal), name);
   if (!exists(file)) {
-    const onBranch = git(["rev-parse", "--verify", "--quiet", `swarm/${goal}`], { check: false }).code === 0;
-    fail(onBranch ? `${goal}: state lives on swarm/${goal}; check it out first` : `no goal ${goal}`);
+    requireBranch(goal);
+    fail(`no goal ${goal}`);
   }
   return file;
 }
@@ -268,7 +275,7 @@ function revise(goal, uid, note) {
   const units = loadUnits(goal);
   const current = getUnit(units, uid);
   if (!["leased", "produced"].includes(current.state)) fail(`${uid} is ${current.state}; only leased or produced units are revised`);
-  const unit = reviseUnit(current, note, userBounds().max_revisions);
+  const unit = reviseUnit(current, note, userBounds().max_revisions, lastFailure(entries(goal), uid));
   saveUnits(goal, putUnit(units, unit));
   log(goal, uid, unit.state === "planned" ? "revise" : "stuck", note);
   save(goal, `${uid} ${unit.state}`);
@@ -449,6 +456,7 @@ function cmdConfig(key, value = "") {
 function cmdNew(goal) {
   const dir = goalDir(goal);
   if (exists(dir)) fail(`${goal} already exists`);
+  requireBranch(goal);
   if (git(["rev-parse", "--verify", "--quiet", "HEAD"], { check: false }).code !== 0) fail("the repo has no commits; commit once, then run new");
   if (!branch()) fail("HEAD is detached; check out the branch the swarm should build on, then run new");
   fs.mkdirSync(dir, { recursive: true });
@@ -489,7 +497,7 @@ function cmdLint(goal) {
 /** A fresh approve starts on base, with no swarm/<goal> yet. Resuming means a crash left us on swarm/<goal>. */
 function branchChecks(goal, header) {
   if (branch() !== header.base) fail(`approve from ${header.base}, not ${branch()}`);
-  if (git(["rev-parse", "--verify", "--quiet", `swarm/${goal}`], { check: false }).code === 0) {
+  if (branchExists(`swarm/${goal}`)) {
     fail(`swarm/${goal} already exists; check it out to finish approving, or delete it to start over`);
   }
 }
@@ -597,7 +605,7 @@ function baselineUnit(goal, unit, earlier) {
 function cmdBaseline(goal) {
   require(goal, "defined");
   onSwarm(goal);
-  const pending = openFindings(entries(goal));
+  const pending = openFindings(entries(goal), loadUnits(goal));
   if (pending.length) fail(`examiner findings not routed into a task yet: ${pending.join(", ")}; run \`amend\` for each`);
   const earlier = entries(goal).filter((e) => e.event === "baseline-pass").map((e) => e.subject);
   const passing = loadUnits(goal).filter((u) => u.state === "planned").map((u) => baselineUnit(goal, u, earlier)).filter(Boolean);
@@ -623,7 +631,9 @@ function leases(goal, units, rows) {
   });
 }
 
-function currentRow(goal) {
+/** The derive row. Without gates, STOP and the bounds are left out: a command asks where the goal stands, not
+ * whether the loop may run on. */
+function currentRow(goal, { gates = true } = {}) {
   const text = contractText(goal);
   const units = loadUnits(goal);
   const rows = entries(goal);
@@ -631,11 +641,13 @@ function currentRow(goal) {
   const proven = settledCriteria(rows);
   const now = fingerprint(units, rows);
   const state = {
-    stop: stopped(), bound: boundHit(rows, { budget: budget(goal), bounds: userBounds(), current: now, unitCount: units.length }), has_contract: true,
+    stop: gates && stopped(),
+    bound: gates ? boundHit(rows, { budget: budget(goal), bounds: userBounds(), current: now, unitCount: units.length }) : null,
+    has_contract: true,
     lint: lintProblems(text, units), events: goalEvents(rows), units,
     max_parallel: parseInt(header.max_parallel, 10) || 3, autonomy: header.autonomy || "ask",
     unproven: criteria(text).filter((c) => !proven.has(c)),
-    open_findings: openFindings(rows),
+    open_findings: openFindings(rows, units),
     phases: Object.fromEntries(units.filter((u) => u.state === "produced").map((u) => [u.unit, unitPhase(rows, u.unit)])),
     fix_exists: rows.some((e) => e.event === "auto-fix"),
     orphans: orphanedLeases(leases(goal, units, rows), userBounds().lease_minutes),
@@ -643,8 +655,17 @@ function currentRow(goal) {
   return { row: derive(state), now };
 }
 
+/** Fails unless the goal stands at this action, so no command can skip ahead of the derive table. */
+function requireRow(goal, action, what) {
+  const [row, at] = currentRow(goal, { gates: false }).row;
+  if (at !== action) fail(`${what} only at row \`${action}\`; the goal is at row ${row} \`${at}\``);
+}
+
 function cmdPeek(goal) {
-  if (!exists(goalDir(goal))) return say("row 2 scope: run `new`, write contract.md and plan.md, then `lint`");
+  if (!exists(goalDir(goal))) {
+    requireBranch(goal);
+    return say("row 2 scope: run `new`, write contract.md and plan.md, then `lint`");
+  }
   const [row, action, detail] = currentRow(goal).row;
   say(`row ${row} ${action}: ${detail}`);
 }
@@ -654,7 +675,10 @@ function reclaimLeases(goal) {
   const units = loadUnits(goal);
   for (const uid of orphanedLeases(leases(goal, units, entries(goal)), userBounds().lease_minutes)) {
     removeWorktreeFor(`unit/${goal}/${uid}`);
-    moveUnit(goal, uid, "planned", "lease lost");
+    // The note keeps the last failure reason, which the next worker reads first.
+    updateUnit(goal, uid, { event: "planned", note: "lease lost", fields: { state: "planned" } });
+    save(goal, `${uid} lease lost`);
+    say(`${uid}: leased -> planned (lease lost)`);
   }
 }
 
@@ -672,12 +696,17 @@ function settle(goal) {
   for (let action = currentRow(goal).row[1]; action in AUTOMATIC; action = currentRow(goal).row[1]) AUTOMATIC[action](goal);
 }
 
+const WAITING = ["approve", "wait", "interrupt"];
+
 function cmdNext(goal) {
   if (!exists(goalDir(goal))) return cmdPeek(goal);
   settle(goal);
   const { row: [row, action, detail], now } = currentRow(goal);
-  log(goal, goal, "pass", now);
-  save(goal, `pass: row ${row}`);
+  // A row that waits on a human or on workers isn't a loop, so it doesn't count toward the bounds.
+  if (!WAITING.includes(action)) {
+    log(goal, goal, "pass", now);
+    save(goal, `pass: row ${row}`);
+  }
   say(`row ${row} ${action}: ${detail}`);
 }
 
@@ -791,7 +820,7 @@ function cmdReview(goal, subject, verdict, ...reason) {
   onSwarm(goal);
   restoreAfterVerifier(goal);
   if (subject === "whole") {
-    require(goal, "proved");
+    requireRow(goal, "whole-review", "a whole review is recorded");
     log(goal, goal, verdict === "pass" ? "whole-review" : "whole-blocking", note);
     save(goal, `whole review ${verdict}`);
     return say(`whole review: ${verdict}`);
@@ -947,6 +976,8 @@ function cmdRescope(goal, uid, scope, ...reason) {
 /** Adds a fix unit F-n, which reopens integration: it runs through implement, check, review, and integrate again. */
 function addFixUnit(goal, task, scope, event) {
   if (!splitList(scope).length) fail("a fix unit needs a scope");
+  const folders = folderScopeProblems([{ unit: "fix", scope }], isFolder);
+  if (folders.length) fail(folders.join("\n"));
   const units = loadUnits(goal);
   const open = units.filter((u) => !CLOSED.includes(u.state)).map((u) => u.unit);
   if (open.length) fail(`units still open: ${open.join(", ")}; a fix unit comes after them`);
@@ -981,15 +1012,27 @@ function cmdReopen(goal, task, scope, ...why) {
 function cmdWaive(goal, target, ...why) {
   const reason = why.join(" ");
   if (!reason) fail("waive needs a reason; it goes in the contract and the hand-off");
-  const text = contractText(goal);
-  if (target !== "whole" && !criteria(text).includes(target)) fail(`no criterion ${target}`);
-  require(goal, "integrated");
-  addDecision(goal, target, `waived: ${reason}`);
-  if (target === "whole") log(goal, goal, "whole-review", `waived: ${reason}`);
-  else log(goal, target, "waived", reason);
-  if (target !== "whole" && criteria(text).every((c) => settledCriteria(entries(goal)).has(c))) log(goal, goal, "proved");
+  if (target === "whole") waiveWhole(goal, reason);
+  else waiveCriterion(goal, target, reason);
   save(goal, `waive ${target}`);
   say(`${target}: waived`);
+}
+
+/** Accept the change despite a whole review that blocks now; it can't stand in for a review that never ran. */
+function waiveWhole(goal, reason) {
+  require(goal, "whole-blocking");
+  if (goalEvents(entries(goal)).has("whole-review")) fail("the whole review isn't blocking; nothing to waive");
+  addDecision(goal, "whole", `waived: ${reason}`);
+  log(goal, goal, "whole-review", `waived: ${reason}`);
+}
+
+function waiveCriterion(goal, cid, reason) {
+  const text = contractText(goal);
+  if (!criteria(text).includes(cid)) fail(`no criterion ${cid}`);
+  require(goal, "integrated");
+  addDecision(goal, cid, `waived: ${reason}`);
+  log(goal, cid, "waived", reason);
+  if (criteria(text).every((c) => settledCriteria(entries(goal)).has(c))) log(goal, goal, "proved");
 }
 
 function cmdIntegrate(goal) {
@@ -1006,6 +1049,8 @@ function cmdIntegrate(goal) {
     exit(1);
   }
   log(goal, goal, "integrated");
+  // After a reopen, criteria settled only by waivers stay settled, so nothing would log `proved` again.
+  if (criteria(contractText(goal)).every((c) => settledCriteria(entries(goal)).has(c))) log(goal, goal, "proved");
   save(goal, "integrated");
 }
 
@@ -1051,7 +1096,7 @@ function routeLearnings(goal) {
 
 function cmdStage(goal, event, ...note) {
   /** @type {Record<string, string>} */
-  const needs = { "whole-review": "integrated", learned: "proved", finding: "approved" };
+  const needs = { learned: "whole-review", finding: "approved" };
   if (!(event in needs)) fail(`stage is one of ${Object.keys(needs).join(", ")}`);
   require(goal, needs[event]);
   if (event === "finding" && !isFinding(note.join(" "))) fail("a finding is `file:line: what is wrong`");
@@ -1107,7 +1152,7 @@ function cleanUp(goal) {
 }
 
 function cmdHandoff(goal) {
-  require(goal, "learned");
+  requireRow(goal, "handoff", "hand-off runs");
   const text = contractText(goal);
   const rows = entries(goal);
   const base = parseHeader(text).base;

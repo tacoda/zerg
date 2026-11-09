@@ -195,6 +195,61 @@ describe("abandon", () => {
     assert.match(r.sh("git show swarm/G-1:.swarm/G-1/contract.md"), /goal: abandoned: wrong approach/);
     assert.match(r.sh("git checkout -q swarm/G-1 && $S peek G-1; git checkout -q main"), /row 15 done: the human abandoned this goal/);
   });
+  test("from base, the goal's commands point to its branch instead of planning it again", () => {
+    assert.match(r.sh("$S next G-1"), /state lives on swarm\/G-1; check it out first/);
+    assert.match(r.sh("$S new G-1"), /state lives on swarm\/G-1; check it out first/);
+  });
+});
+
+describe("the close can't be skipped", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  const S = (cmd) => r.sh(`$S ${cmd}`);
+  const finish = (uid, change) => {
+    S(`lease G-1 ${uid}`);
+    r.work("G-1", uid, change);
+    return S(`report G-1 ${uid} produced done && $S check G-1 ${uid} && $S review G-1 ${uid} pass ok && $S merge G-1 ${uid}`);
+  };
+  test("integrated, with every criterion waived", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    S("approve G-1 ask");
+    definedGoal(r);
+    S("baseline G-1");
+    finish("U-001", "printf '\\ndef sub(a, b):\\n    return a - b\\n' >> src/calc.py");
+    assert.match(finish("U-002", "printf 'def mul(a, b):\\n    return a * b\\n' > src/mul.py"), /U-002: produced -> merged/);
+    assert.match(S("integrate G-1"), /"suite": "pass"/);
+    S("waive G-1 C1 'shown by the unit test' && $S waive G-1 C2 'shown by the unit test'");
+  });
+  test("nothing skips the whole review", () => {
+    assert.match(S("stage G-1 whole-review skip"), /stage is one of learned, finding/);
+    assert.match(S("waive G-1 whole nothing blocks"), /`whole-blocking` hasn't happened yet/);
+    assert.match(S("stage G-1 learned"), /`whole-review` hasn't happened yet/);
+    assert.match(S("handoff G-1"), /hand-off runs only at row `handoff`; the goal is at row 12 `whole-review`/);
+  });
+  test("a blocking verdict can't be replaced by a second verifier", () => {
+    assert.match(S("review G-1 whole fail 'src/mul.py:1: duplicate helper'"), /whole review: fail/);
+    assert.match(S("review G-1 whole pass 'looks fine'"), /only at row `whole-review`; the goal is at row 12 `add-fix`/);
+  });
+  test("a fix unit's scope can't be a folder", () => {
+    assert.match(S("add-fix G-1 dedupe src"), /scope src is a folder/);
+  });
+  test("after a reopen, waivers still settle the criteria, so the whole review can run", () => {
+    assert.match(S("add-fix G-1 dedupe src/dedupe.py"), /added F-1/);
+    finish("F-1", "printf 'Y = 2\\n' > src/dedupe.py");
+    S("integrate G-1");
+    assert.match(S("next G-1"), /row 12 whole-review/);
+    assert.match(S("review G-1 whole pass 'fits together'"), /whole review: pass/);
+  });
+});
+
+describe("rows that wait don't count toward the bounds", () => {
+  const r = makeRepo();
+  after(r.cleanup);
+  test("resuming at the approve question many times never trips no-progress", () => {
+    plannedGoal(r, { rows: TWO_UNITS });
+    for (let i = 0; i < 4; i++) r.sh("$S next G-1");
+    assert.match(r.sh("$S next G-1"), /row 3 approve/);
+  });
 });
 
 describe("token budget and the lock", () => {
@@ -251,8 +306,8 @@ describe("user layer and stage validation", () => {
     r.sh("$S approve G-1 ask");
     assert.match(r.sh("$S tokens G-1 W-1 implement lots"), /whole number/);
     assert.match(r.sh("$S stage G-1 nonsense"), /stage is one of/);
-    assert.match(r.sh("$S stage G-1 learned"), /`proved` hasn't happened yet/);
+    assert.match(r.sh("$S stage G-1 learned"), /`whole-review` hasn't happened yet/);
     assert.match(r.sh("$S waive G-1 C9 because"), /no criterion C9/);
-    assert.match(r.sh("$S handoff G-1"), /`learned` hasn't happened yet/);
+    assert.match(r.sh("$S handoff G-1"), /hand-off runs only at row `handoff`/);
   });
 });

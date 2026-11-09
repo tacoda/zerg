@@ -108,6 +108,7 @@ Record answers through the script, never by editing files:
 | change a stuck or planned unit's scope | `S rescope <goal> <unit> "<scope>" "<why>"` |
 | drop a stuck or planned unit | `S move <goal> <unit> dropped "<why>"` |
 | fix after a goal-level failure | `S reopen <goal> "<task>" "<scope>" "<why>"` |
+| retry an integration the human calls flaky | `S answer <goal> goal "<q>: <a>"`, then `S integrate <goal>` |
 | accept a criterion without proof | `S waive <goal> <C> "<why>"` |
 | accept the whole change despite a blocking review | `S waive <goal> whole "<why>"` |
 | stop the goal for good | `S abandon <goal> "<why>"`. It keeps `swarm/<goal>` as the record, removes the worktrees, merged unit branches, and holdout, and checks out the base branch. |

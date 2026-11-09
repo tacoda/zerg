@@ -191,7 +191,10 @@ describe("learned rules", () => {
       { event: "examiner-finding", subject: "U-002", note: "" },
       { event: "amended", subject: "U-001", note: "" },
     ];
-    assert.deepEqual(swarm.openFindings(rows), ["U-002"]);
+    const units = [unit("U-001", "a"), unit("U-002", "b"), unit("U-003", "c", { state: "dropped" })];
+    assert.deepEqual(swarm.openFindings(rows, units), ["U-002"]);
+    rows.push({ event: "examiner-finding", subject: "U-003", note: "" });
+    assert.deepEqual(swarm.openFindings(rows, units), ["U-002"], "a dropped unit's finding no longer blocks");
     const s = state({ events: new Set(["approved", "defined"]), open_findings: ["U-002"] });
     assert.deepEqual(swarm.derive(s).slice(0, 2), [4, "amend"]);
   });
@@ -490,4 +493,19 @@ test("a scope entry that names a folder is a lint problem; a glob over it is not
     "U-001: scope vendor/old is a folder, and a scope matches files; write vendor/old/**",
     "U-003: scope lib/ is a folder, and a scope matches files; write lib/**",
   ]);
+});
+
+test("the repeat bound compares a failure with the last failure, not the worker's report", () => {
+  const row = (event, note, subject = "U-1") => ({ subject, event, note });
+  const rows = [row("revise", "check fails: 1 failed"), row("produced", "tried again")];
+  assert.equal(swarm.lastFailure(rows, "U-1"), "check fails: 1 failed");
+  const unit_ = unit("U-1", "a", { state: "produced", revisions: "1", note: "tried again" });
+  assert.equal(swarm.reviseUnit(unit_, "check fails: 1 failed", 2, swarm.lastFailure(rows, "U-1")).state, "stuck");
+  rows.push(row("answered", "use the other sign"));
+  assert.equal(swarm.lastFailure(rows, "U-1"), "", "a human answer starts a fresh course");
+});
+
+test("a passing integration clears an earlier failure", () => {
+  const events = swarm.goalEvents([{ event: "integrate-failed" }, { event: "integrated" }]);
+  assert.ok(events.has("integrated") && !events.has("integrate-failed"));
 });
